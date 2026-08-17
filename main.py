@@ -18,20 +18,6 @@ def limpar_moeda_seguro(valor):
     if isinstance(valor, (int, float)):
         return float(valor)
     
-    val_str = str(valor).replace('R$', '').strip()
-    
-    if ',' in val_str and '.' in val_str:
-        if val_str.rfind(',') > val_str.rfind('.'):
-            val_str = val_str.replace('.', '').replace(',', '.')
-        else:
-            val_str = val_str.replace(',', '')
-    elif ',' in val_str:
-        val_str = val_str.replace(',', '.')
-    elif val_str.count('.') > 1:
-        partes = val_str.split('.')
-        val_str = "".join(partes[:-1]) + "." + partes[-1]
-        
-    return float(val_str)
 
 def run_pipeline():
     print("Autenticando no Google Drive/Sheets...")
