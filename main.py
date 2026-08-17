@@ -6,17 +6,11 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# 1. Carrega os Secrets do GitHub
+# Puxa os Secrets configurados no GitHub
 ACCESS_TOKEN = os.environ.get('META_ACCESS_TOKEN')
 IG_ACCOUNT_ID = os.environ.get('META_IG_ACCOUNT_ID')
 GCP_CREDENTIALS = os.environ.get('GCP_CREDENTIALS')
 SHEET_ID = os.environ.get('GOOGLE_SHEET_ID')
-
-def limpar_moeda(valor):
-    if pd.isna(valor) or valor == '': return 0.0
-    if isinstance(valor, str):
-        return float(valor.replace('R$', '').replace('.', '').replace(',', '.').strip())
-    return float(valor)
 
 def run_pipeline():
     print("Autenticando no Google Drive/Sheets...")
@@ -30,7 +24,7 @@ def run_pipeline():
     planilha = client.open_by_key(SHEET_ID)
     
     print("Lendo abas de dados...")
-    # Lê as abas do Google Sheets e converte para DataFrames
+    # Lê as abas garantindo que colunas vazias não quebrem o formato
     df_semente = pd.DataFrame(planilha.worksheet("Tabela_Semente").get_all_records())
     df_cliques = pd.DataFrame(planilha.worksheet("Shopee_Cliques").get_all_records())
     df_vendas = pd.DataFrame(planilha.worksheet("Shopee_Vendas").get_all_records())
@@ -90,10 +84,13 @@ def run_pipeline():
     df_cliques[['sub_id1', 'sub_id2']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
     shopee_cliques_agrupado = df_cliques.groupby(['sub_id1', 'sub_id2']).size().reset_index(name='Cliques_Shopee')
 
+    # Tratamento robusto das vendas
     df_vendas['sub_id1'] = df_vendas['Sub_id1'].astype(str).str.lower().str.strip()
     df_vendas['sub_id2'] = df_vendas['Sub_id2'].astype(str).str.lower().str.strip()
-    df_vendas['Valor de Compra(R$)'] = df_vendas['Valor de Compra(R$)'].apply(limpar_moeda)
-    df_vendas['Comissão líquida do afiliado(R$)'] = df_vendas['Comissão líquida do afiliado(R$)'].apply(limpar_moeda)
+    
+    # Converte colunas financeiras para numérico, tratando erros
+    df_vendas['Valor de Compra(R$)'] = pd.to_numeric(df_vendas['Valor de Compra(R$)'], errors='coerce').fillna(0)
+    df_vendas['Comissão líquida do afiliado(R$)'] = pd.to_numeric(df_vendas['Comissão líquida do afiliado(R$)'], errors='coerce').fillna(0)
 
     shopee_vendas_agrupado = df_vendas.groupby(['sub_id1', 'sub_id2']).agg(
         Compras_Shopee=('ID do pedido', 'count'),
@@ -106,24 +103,24 @@ def run_pipeline():
     shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_vendas_agrupado, on=['sub_id1', 'sub_id2'], how='outer').fillna(0)
     df_analise = pd.merge(df_analise, shopee_consolidado, on=['sub_id1', 'sub_id2'], how='left').fillna(0)
     
-    interacoes = df_analise['Curtidas'] + df_analise['Comentarios'] + df_analise['Salvamentos'] + df_analise['Compartilhamentos']
-    df_analise['Taxa_Engajamento(%)'] = (interacoes / df_analise['Visualizacoes'].replace(0, np.nan)) * 100
+    # Cálculos seguros
+    df_analise['Taxa_Engajamento(%)'] = ((df_analise['Curtidas'] + df_analise['Comentarios'] + df_analise['Salvamentos'] + df_analise['Compartilhamentos']) / df_analise['Visualizacoes'].replace(0, np.nan)) * 100
     df_analise['Taxa_Conversao(%)'] = (df_analise['Compras_Shopee'] / df_analise['Cliques_Shopee'].replace(0, np.nan)) * 100
     df_analise['RPC_por_clique(R$)'] = df_analise['Comissao_Gerada'] / df_analise['Cliques_Shopee'].replace(0, np.nan)
     df_analise['RPV_1k_views(R$)'] = (df_analise['Comissao_Gerada'] / df_analise['Visualizacoes'].replace(0, np.nan)) * 1000
     df_analise['Ticket_Medio(R$)'] = df_analise['Valor_Total_Compras'] / df_analise['Compras_Shopee'].replace(0, np.nan)
 
-    # Prepara o Dataframe para o Google Sheets (Gspread não aceita Infinity ou NaN)
-    df_analise = df_analise.replace([np.inf, -np.inf], np.nan).fillna('')
-    df_analise = df_analise.round(2)
+    df_analise = df_analise.replace([np.inf, -np.inf], np.nan).fillna(0).round(2)
 
-    # 6. ESCREVER RESULTADO NO GOOGLE SHEETS
+    # 6. ESCREVER NO GOOGLE SHEETS
     print("Enviando resultados para a aba Dashboard...")
     aba_dashboard = planilha.worksheet("Dashboard")
     aba_dashboard.clear()
-    aba_dashboard.update([df_analise.columns.values.tolist()] + df_analise.values.tolist())
+    # Adiciona cabeçalho e dados em uma única operação
+    dados_para_enviar = [df_analise.columns.values.tolist()] + df_analise.values.tolist()
+    aba_dashboard.update(dados_para_enviar)
     
-    print("Pipeline concluído! Planilha do Drive atualizada com sucesso.")
+    print("Pipeline concluído com sucesso!")
 
 if __name__ == "__main__":
     run_pipeline()
