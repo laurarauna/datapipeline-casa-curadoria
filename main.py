@@ -12,10 +12,30 @@ IG_ACCOUNT_ID = os.environ.get('META_IG_ACCOUNT_ID')
 GCP_CREDENTIALS = os.environ.get('GCP_CREDENTIALS')
 SHEET_ID = os.environ.get('GOOGLE_SHEET_ID')
 
+def limpar_moeda_seguro(valor):
+    if pd.isna(valor) or valor == '':
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    
+    val_str = str(valor).replace('R$', '').strip()
+    
+    if ',' in val_str and '.' in val_str:
+        if val_str.rfind(',') > val_str.rfind('.'):
+            val_str = val_str.replace('.', '').replace(',', '.')
+        else:
+            val_str = val_str.replace(',', '')
+    elif ',' in val_str:
+        val_str = val_str.replace(',', '.')
+    elif val_str.count('.') > 1:
+        partes = val_str.split('.')
+        val_str = "".join(partes[:-1]) + "." + partes[-1]
+        
+    return float(val_str)
+
 def run_pipeline():
     print("Autenticando no Google Drive/Sheets...")
     
-    # 2. Conexão com o Google Sheets
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GCP_CREDENTIALS)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -23,8 +43,7 @@ def run_pipeline():
     
     planilha = client.open_by_key(SHEET_ID)
     
-    print("Lendo abas de dados...")
-    # Lê as abas garantindo que colunas vazias não quebrem o formato
+    print("Lendo abas de dados do Google Sheets...")
     df_semente = pd.DataFrame(planilha.worksheet("Tabela_Semente").get_all_records())
     df_cliques = pd.DataFrame(planilha.worksheet("Shopee_Cliques").get_all_records())
     df_vendas = pd.DataFrame(planilha.worksheet("Shopee_Vendas").get_all_records())
@@ -33,12 +52,13 @@ def run_pipeline():
         print("Tabela Semente vazia. Encerrando.")
         return
 
-    # Padroniza Semente
+    # Padronização da Semente
     df_semente['Post_ID'] = df_semente['Post_ID'].astype(str).str.strip()
     df_semente['sub_id1'] = df_semente['sub_id1'].astype(str).str.lower().str.strip()
     df_semente['sub_id2'] = df_semente['sub_id2'].astype(str).str.lower().str.strip()
+    df_semente['sub_id2'] = df_semente['sub_id2'].replace(['(vazio)', 'nan', 'none', ''], '')
 
-    # 3. EXTRAÇÃO META API (IG)
+    # 1. EXTRAÇÃO META API (INSTAGRAM)
     print("Extraindo dados da Meta API...")
     dados_ig = []
     
@@ -71,8 +91,8 @@ def run_pipeline():
     df_meta = pd.DataFrame(dados_ig)
     df_analise = pd.merge(df_semente, df_meta, on='Post_ID', how='left')
 
-    # 4. TRANSFORMAÇÃO SHOPEE (CLIQUES E VENDAS)
-    print("Processando Shopee...")
+    # 2. TRANSFORMAÇÃO SHOPEE (CLIQUES)
+    print("Processando Cliques da Shopee...")
     df_cliques['Sub_id'] = df_cliques['Sub_id'].astype(str).fillna('')
     
     def extrair_subs_clique(sub_str):
@@ -84,31 +104,41 @@ def run_pipeline():
     df_cliques[['sub_id1', 'sub_id2']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
     shopee_cliques_agrupado = df_cliques.groupby(['sub_id1', 'sub_id2']).size().reset_index(name='Cliques_Shopee')
 
-    # Tratamento robusto das vendas
-    df_vendas['sub_id1'] = df_vendas['Sub_id1'].astype(str).str.lower().str.strip()
-    df_vendas['sub_id2'] = df_vendas['Sub_id2'].astype(str).str.lower().str.strip()
-    
-    # Converte colunas financeiras para numérico, tratando erros
-    df_vendas['Valor de Compra(R$)'] = pd.to_numeric(df_vendas['Valor de Compra(R$)'], errors='coerce').fillna(0)
-    df_vendas['Comissão líquida do afiliado(R$)'] = pd.to_numeric(df_vendas['Comissão líquida do afiliado(R$)'], errors='coerce').fillna(0)
+    # 3. TRANSFORMAÇÃO SHOPEE (VENDAS COM TRATAMENTO SEGURO DE MOEDA)
+    print("Processando Vendas da Shopee...")
+    df_vendas['sub_id1'] = df_vendas['Sub_id1'].fillna('').astype(str).str.lower().str.strip()
+    df_vendas['sub_id2'] = df_vendas['Sub_id2'].fillna('').astype(str).str.lower().str.strip()
+    df_vendas['sub_id2'] = df_vendas['sub_id2'].replace(['nan', 'none', ''], '')
 
+    # Aplicação da limpeza segura de decimais
+    df_vendas['Valor de Compra(R$)'] = df_vendas['Valor de Compra(R$)'].apply(limpar_moeda_seguro)
+    df_vendas['Comissão líquida do afiliado(R$)'] = df_vendas['Comissão líquida do afiliado(R$)'].apply(limpar_moeda_seguro)
+
+    # Agrupamento de Vendas e Comissões
     shopee_vendas_agrupado = df_vendas.groupby(['sub_id1', 'sub_id2']).agg(
         Compras_Shopee=('ID do pedido', 'count'),
         Valor_Total_Compras=('Valor de Compra(R$)', 'sum'),
         Comissao_Gerada=('Comissão líquida do afiliado(R$)', 'sum')
     ).reset_index()
 
-    # 5. MERGE E CÁLCULOS
-    print("Consolidando métricas...")
-    shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_vendas_agrupado, on=['sub_id1', 'sub_id2'], how='outer').fillna(0)
+    # Cálculo Refinado de Ticket Médio por ID de Pedido
+    df_vendas_por_pedido = df_vendas.groupby(['sub_id1', 'sub_id2', 'ID do pedido'])['Valor de Compra(R$)'].sum().reset_index()
+    ticket_medio_por_sub = df_vendas_por_pedido.groupby(['sub_id1', 'sub_id2'])['Valor de Compra(R$)'].mean().reset_index()
+    ticket_medio_por_sub.columns = ['sub_id1', 'sub_id2', 'Ticket_Medio(R$)']
+
+    # 4. CONSOLIDAÇÃO E MERGE
+    print("Consolidando métricas e KPIs...")
+    shopee_consolidado = pd.merge(shopee_vendas_agrupado, ticket_medio_por_sub, on=['sub_id1', 'sub_id2'], how='left')
+    shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_consolidado, on=['sub_id1', 'sub_id2'], how='outer').fillna(0)
+    
     df_analise = pd.merge(df_analise, shopee_consolidado, on=['sub_id1', 'sub_id2'], how='left').fillna(0)
     
-    # Cálculos seguros
-    df_analise['Taxa_Engajamento(%)'] = ((df_analise['Curtidas'] + df_analise['Comentarios'] + df_analise['Salvamentos'] + df_analise['Compartilhamentos']) / df_analise['Visualizacoes'].replace(0, np.nan)) * 100
+    # 5. CÁLCULO DOS INDICADORES FINAIS
+    interacoes = df_analise['Curtidas'] + df_analise['Comentarios'] + df_analise['Salvamentos'] + df_analise['Compartilhamentos']
+    df_analise['Taxa_Engajamento(%)'] = (interacoes / df_analise['Visualizacoes'].replace(0, np.nan)) * 100
     df_analise['Taxa_Conversao(%)'] = (df_analise['Compras_Shopee'] / df_analise['Cliques_Shopee'].replace(0, np.nan)) * 100
     df_analise['RPC_por_clique(R$)'] = df_analise['Comissao_Gerada'] / df_analise['Cliques_Shopee'].replace(0, np.nan)
     df_analise['RPV_1k_views(R$)'] = (df_analise['Comissao_Gerada'] / df_analise['Visualizacoes'].replace(0, np.nan)) * 1000
-    df_analise['Ticket_Medio(R$)'] = df_analise['Valor_Total_Compras'] / df_analise['Compras_Shopee'].replace(0, np.nan)
 
     df_analise = df_analise.replace([np.inf, -np.inf], np.nan).fillna(0).round(2)
 
@@ -116,11 +146,10 @@ def run_pipeline():
     print("Enviando resultados para a aba Dashboard...")
     aba_dashboard = planilha.worksheet("Dashboard")
     aba_dashboard.clear()
-    # Adiciona cabeçalho e dados em uma única operação
     dados_para_enviar = [df_analise.columns.values.tolist()] + df_analise.values.tolist()
     aba_dashboard.update(dados_para_enviar)
     
-    print("Pipeline concluído com sucesso!")
+    print("Pipeline concluído com sucesso e valores corrigidos!")
 
 if __name__ == "__main__":
     run_pipeline()
