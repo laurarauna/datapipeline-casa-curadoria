@@ -130,7 +130,9 @@ def run_pipeline():
     )
 
     df_vendas = pd.DataFrame(
-        planilha.worksheet("Shopee_Vendas").get_all_records()
+    planilha.worksheet("Shopee_Vendas").get_all_records(
+        value_render_option='UNFORMATTED_VALUE'
+        )
     )
 
     if df_semente.empty:
@@ -299,15 +301,15 @@ def run_pipeline():
     # 5. CAMPOS FINANCEIROS
     # =========================================================
 
-    df_vendas['Valor de Compra(R$)'] = (
-        df_vendas['Valor de Compra(R$)']
-        .apply(limpar_moeda_seguro)
-    )
-
-    df_vendas['Comissão líquida do afiliado(R$)'] = (
-        df_vendas['Comissão líquida do afiliado(R$)']
-        .apply(limpar_moeda_seguro)
-    )
+    df_vendas['Valor de Compra(R$)'] = pd.to_numeric(
+        df_vendas['Valor de Compra(R$)'],
+        errors='coerce'
+    ).fillna(0)
+    
+    df_vendas['Comissão líquida do afiliado(R$)'] = pd.to_numeric(
+        df_vendas['Comissão líquida do afiliado(R$)'],
+        errors='coerce'
+    ).fillna(0)
 
     # =========================================================
     # 6. VENDAS AGREGADAS
