@@ -118,12 +118,12 @@ def run_pipeline():
     df_analise = df_analise.round(2)
 
     # 6. ESCREVER RESULTADO NO GOOGLE SHEETS
-    print("Enviando resultados para a aba Dashboard no Google Drive...")
+    print("Enviando resultados para a aba Dashboard...")
     aba_dashboard = planilha.worksheet("Dashboard")
     aba_dashboard.clear()
     aba_dashboard.update([df_analise.columns.values.tolist()] + df_analise.values.tolist())
     
-    print("Pipeline concluído e planilha do Drive atualizada!")
+    print("Pipeline concluído! Planilha do Drive atualizada com sucesso.")
 
 if __name__ == "__main__":
     run_pipeline()
