@@ -18,6 +18,25 @@ def limpar_moeda_seguro(valor):
     if isinstance(valor, (int, float)):
         return float(valor)
     
+    val_str = str(valor).replace('R$', '').strip()
+    if not val_str:
+        return 0.0
+    
+    # Tratamento para formatos mistos ou padrão brasileiro (vírgula como decimal)
+    if ',' in val_str and '.' in val_str:
+        if val_str.rfind(',') > val_str.rfind('.'):
+            val_str = val_str.replace('.', '').replace(',', '.')
+        else:
+            val_str = val_str.replace(',', '')
+    elif ',' in val_str:
+        val_str = val_str.replace(',', '.')
+    elif '.' in val_str:
+        # Evita remover ponto se for separador decimal legítimo (ex: 35.99 ou 1.0797)
+        parts = val_str.split('.')
+        if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and len(parts[0]) <= 3):
+            val_str = val_str.replace('.', '')
+            
+    return float(val_str)
 
 def run_pipeline():
     print("Autenticando no Google Drive/Sheets...")
@@ -96,7 +115,7 @@ def run_pipeline():
     df_vendas['sub_id2'] = df_vendas['Sub_id2'].fillna('').astype(str).str.lower().str.strip()
     df_vendas['sub_id2'] = df_vendas['sub_id2'].replace(['nan', 'none', ''], '')
 
-    # Aplicação da limpeza segura de decimais
+    # Aplicação da limpeza segura de decimais nos campos financeiros
     df_vendas['Valor de Compra(R$)'] = df_vendas['Valor de Compra(R$)'].apply(limpar_moeda_seguro)
     df_vendas['Comissão líquida do afiliado(R$)'] = df_vendas['Comissão líquida do afiliado(R$)'].apply(limpar_moeda_seguro)
 
