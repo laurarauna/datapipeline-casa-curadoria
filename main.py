@@ -291,12 +291,6 @@ def run_pipeline():
         df_vendas['Sub_id2']
     )
 
-    # Padronização opcional de typo
-    df_vendas['sub_id2'] = (
-        df_vendas['sub_id2']
-        .replace({'carrosel': 'carrossel'})
-    )
-
     # =========================================================
     # 5. CAMPOS FINANCEIROS
     # =========================================================
