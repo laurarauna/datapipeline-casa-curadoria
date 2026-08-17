@@ -173,7 +173,7 @@ def run_pipeline():
         url = (
             f"https://graph.facebook.com/v18.0/{post_id}"
             f"?fields=insights.metric("
-            f"impressions,likes,comments,saved,shares"
+            f"views,likes,comments,saved,shares"
             f")&access_token={ACCESS_TOKEN}"
         )
 
@@ -188,7 +188,7 @@ def run_pipeline():
             )
 
             metrics = {
-                'impressions': 0,
+                'views': 0,
                 'likes': 0,
                 'comments': 0,
                 'saved': 0,
@@ -207,7 +207,7 @@ def run_pipeline():
 
             dados_ig.append({
                 'Post_ID': post_id,
-                'Visualizacoes': metrics['impressions'],
+                'Visualizacoes': metrics['views'],
                 'Curtidas': metrics['likes'],
                 'Comentarios': metrics['comments'],
                 'Salvamentos': metrics['saved'],
