@@ -1,10 +1,7 @@
-
 name: ETL Pipeline Casa Curadoria
 
 on:
-  # Permite que você rode o script manualmente apertando um botão no GitHub
   workflow_dispatch:
-  # Roda automaticamente todo dia às 03:00 da manhã (horário UTC)
   schedule:
     - cron: '0 3 * * *'
 
@@ -33,12 +30,3 @@ jobs:
         GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       run: python main.py
-
-    - name: Fazer commit do resultado atualizado
-      run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action Bot"
-        git add data/Analise_Posts_Dashboard.csv
-        # Tenta commitar. Se não houver mudanças, ele ignora silenciosamente.
-        git commit -m "Automated update: Dashboard CSV" || echo "Nenhuma mudança para commitar"
-        git push
