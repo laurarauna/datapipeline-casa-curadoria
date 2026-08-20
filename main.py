@@ -475,9 +475,19 @@ def escrever_aba(
 
     aba.clear()
 
+    # O Google Sheets/gspread não aceita NaN ou +/-inf no JSON.
+    # Convertemos esses valores ausentes para None, que é serializado
+    # corretamente como célula vazia.
+    df_export = dataframe.copy()
+    df_export = df_export.replace([np.inf, -np.inf], np.nan)
+    df_export = df_export.astype(object).where(
+        pd.notna(df_export),
+        None
+    )
+
     valores = (
-        [dataframe.columns.tolist()]
-        + dataframe.values.tolist()
+        [df_export.columns.tolist()]
+        + df_export.values.tolist()
     )
 
     aba.update(
