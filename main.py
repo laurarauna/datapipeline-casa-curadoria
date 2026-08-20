@@ -2187,20 +2187,12 @@ def run_pipeline():
 
         print(
             "Posts com Meta OK: "
-            f"{("
-                df_analise[
-                    'Meta_Status'
-                ] == 'OK'
-            ).sum()}"
+            f"{meta_ok}"
         )
 
         print(
             "Posts com erro Meta: "
-            f"{("
-                df_analise[
-                    'Meta_Status'
-                ] != 'OK'
-            ).sum()}"
+            f"{meta_erro}"
         )
 
     print(
