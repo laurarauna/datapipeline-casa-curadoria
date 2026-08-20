@@ -48,13 +48,12 @@ def limpar_moeda_seguro(valor):
     try:
         return float(val_str)
     except ValueError:
-        print(f'Valor monetário inválido: {valor}')
         return 0.0
 
 
 def normalizar_subid(serie):
     """
-    Padroniza sub_ids para evitar falhas de merge.
+    Padroniza sub_ids para evitar falhas de merge (Inclui correção do carrosel)
     """
     serie = (
         serie
@@ -69,6 +68,7 @@ def normalizar_subid(serie):
         'nan': '',
         'none': '',
         'null': '',
+        'carrosel': 'carrossel' # Correção global do erro de digitação
     })
 
     return serie
@@ -112,7 +112,7 @@ def run_pipeline():
     df_semente['sub_id2'] = normalizar_subid(df_semente['sub_id2'])
 
     # =========================================================
-    # 2. META / INSTAGRAM (Agora puxando o Timestamp)
+    # 2. META / INSTAGRAM
     # =========================================================
 
     print("Extraindo dados da Meta API...")
@@ -122,7 +122,6 @@ def run_pipeline():
         if not post_id or post_id == 'nan':
             continue
 
-        # Adicionado o campo 'timestamp' na URL
         url = (
             f"https://graph.facebook.com/v18.0/{post_id}"
             f"?fields=timestamp,insights.metric("
@@ -133,8 +132,6 @@ def run_pipeline():
         try:
             response = requests.get(url, timeout=30).json()
             insights = response.get('insights', {}).get('data', [])
-            
-            # Captura a data de criação do post
             data_postagem = response.get('timestamp', '')
 
             metrics = {'views': 0, 'likes': 0, 'comments': 0, 'saved': 0, 'shares': 0}
@@ -163,20 +160,28 @@ def run_pipeline():
 
     df_meta = pd.DataFrame(dados_ig)
     
-    # Formata a Data_Postagem para o padrão legível (YYYY-MM-DD HH:MM:SS)
-    df_meta['Data_Postagem'] = pd.to_datetime(df_meta['Data_Postagem'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+    # Formata a Data_Postagem no padrão BR (DD/MM/YYYY)
+    df_meta['Data_Postagem'] = (
+        pd.to_datetime(df_meta['Data_Postagem'], errors='coerce')
+        .dt.strftime('%d/%m/%Y %H:%M')
+        .fillna('-')
+    )
 
     df_analise = pd.merge(df_semente, df_meta, on='Post_ID', how='left')
 
     # =========================================================
-    # 3. CLIQUES SHOPEE (Adicionado Data do Último Clique)
+    # 3. CLIQUES SHOPEE
     # =========================================================
 
     print("Processando Cliques da Shopee...")
     df_cliques['Sub_id'] = df_cliques['Sub_id'].fillna('').astype(str).str.strip()
     
-    # Converte a coluna para data para extrair o máximo
-    df_cliques['Tempo dos Cliques'] = pd.to_datetime(df_cliques['Tempo dos Cliques'], errors='coerce')
+    # IMPORTANTE: dayfirst=True ensina ao Python que os dados da Shopee estão no formato DD/MM
+    df_cliques['Tempo dos Cliques'] = pd.to_datetime(
+        df_cliques['Tempo dos Cliques'], 
+        dayfirst=True, 
+        errors='coerce'
+    )
 
     def extrair_subs_clique(sub_str):
         partes = [p.strip().lower() for p in sub_str.split('-') if p.strip()]
@@ -191,23 +196,32 @@ def run_pipeline():
         .groupby(['sub_id1', 'sub_id2'], dropna=False)
         .agg(
             Cliques_Shopee=('Sub_id', 'size'),
-            Data_Ultimo_Clique=('Tempo dos Cliques', 'max') # Nova Coluna
+            Data_Ultimo_Clique=('Tempo dos Cliques', 'max')
         )
         .reset_index()
     )
-    # Formata de volta para string para subir pro Sheets sem erro
-    shopee_cliques_agrupado['Data_Ultimo_Clique'] = shopee_cliques_agrupado['Data_Ultimo_Clique'].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+    
+    # Converte de volta para Texto no padrão BR (ou hífen se não tiver)
+    shopee_cliques_agrupado['Data_Ultimo_Clique'] = (
+        shopee_cliques_agrupado['Data_Ultimo_Clique']
+        .dt.strftime('%d/%m/%Y %H:%M')
+        .fillna('-')
+    )
 
     # =========================================================
-    # 4. VENDAS SHOPEE (Adicionado Data da Última Venda)
+    # 4. VENDAS SHOPEE
     # =========================================================
 
     print("Processando Vendas da Shopee...")
     df_vendas['sub_id1'] = normalizar_subid(df_vendas['Sub_id1'])
     df_vendas['sub_id2'] = normalizar_subid(df_vendas['Sub_id2'])
 
-    # Tratamento da Data do Pedido
-    df_vendas['Horário do pedido'] = pd.to_datetime(df_vendas['Horário do pedido'], errors='coerce')
+    # IMPORTANTE: dayfirst=True evita o erro "1970"
+    df_vendas['Horário do pedido'] = pd.to_datetime(
+        df_vendas['Horário do pedido'], 
+        dayfirst=True, 
+        errors='coerce'
+    )
 
     # =========================================================
     # 5. CAMPOS FINANCEIROS
@@ -227,12 +241,17 @@ def run_pipeline():
             Compras_Shopee=('ID do pedido', 'nunique'),
             Valor_Total_Compras=('Valor de Compra(R$)', 'sum'),
             Comissao_Gerada=('Comissão líquida do afiliado(R$)', 'sum'),
-            Data_Ultima_Venda=('Horário do pedido', 'max') # Nova Coluna
+            Data_Ultima_Venda=('Horário do pedido', 'max')
         )
         .reset_index()
     )
-    # Formata de volta para string
-    shopee_vendas_agrupado['Data_Ultima_Venda'] = shopee_vendas_agrupado['Data_Ultima_Venda'].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+    
+    # Converte de volta para Texto no padrão BR (ou hífen se for nulo)
+    shopee_vendas_agrupado['Data_Ultima_Venda'] = (
+        shopee_vendas_agrupado['Data_Ultima_Venda']
+        .dt.strftime('%d/%m/%Y %H:%M')
+        .fillna('-')
+    )
 
     # =========================================================
     # 7. TICKET MÉDIO POR PEDIDO
@@ -273,10 +292,11 @@ def run_pipeline():
     ]
     df_analise[colunas_numericas] = df_analise[colunas_numericas].fillna(0)
     
+    # Preenche datas vazias com hífen "-" para o Google Sheets não inventar datas
     colunas_texto = ['Data_Postagem', 'Data_Ultimo_Clique', 'Data_Ultima_Venda']
     for col in colunas_texto:
         if col in df_analise.columns:
-            df_analise[col] = df_analise[col].fillna('')
+            df_analise[col] = df_analise[col].replace('', '-').fillna('-')
 
     # =========================================================
     # 10. KPIs
@@ -296,14 +316,12 @@ def run_pipeline():
     df_analise = df_analise.replace([np.inf, -np.inf], np.nan)
     df_analise[colunas_numericas] = df_analise[colunas_numericas].fillna(0).round(2)
     
-    # KPIs Rounding
     df_analise['Taxa_Engajamento(%)'] = df_analise['Taxa_Engajamento(%)'].fillna(0).round(2)
     df_analise['Taxa_Conversao(%)'] = df_analise['Taxa_Conversao(%)'].fillna(0).round(2)
     df_analise['RPC_por_clique(R$)'] = df_analise['RPC_por_clique(R$)'].fillna(0).round(4)
     df_analise['RPV_1k_views(R$)'] = df_analise['RPV_1k_views(R$)'].fillna(0).round(4)
 
-    # Preenchendo DataFrames para evitar envio de 'NaN' ao Google Sheets
-    df_analise = df_analise.fillna('')
+    df_analise = df_analise.fillna('-')
 
     # =========================================================
     # 12. GOOGLE SHEETS
