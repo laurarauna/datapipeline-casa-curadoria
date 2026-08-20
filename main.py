@@ -205,7 +205,6 @@ def run_pipeline():
     print("Processando Vendas da Shopee...")
     df_vendas['sub_id1'] = normalizar_subid(df_vendas['Sub_id1'])
     df_vendas['sub_id2'] = normalizar_subid(df_vendas['Sub_id2'])
-    df_vendas['sub_id2'] = df_vendas['sub_id2'].replace({'carrosel': 'carrossel'})
 
     # Tratamento da Data do Pedido
     df_vendas['Horário do pedido'] = pd.to_datetime(df_vendas['Horário do pedido'], errors='coerce')
