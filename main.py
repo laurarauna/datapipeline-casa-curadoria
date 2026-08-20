@@ -24,22 +24,14 @@ def limpar_moeda_seguro(valor):
     if isinstance(valor, numbers.Number):
         return float(valor)
 
-    val_str = str(valor).strip()
-
-    val_str = (
-        val_str
-        .replace('R$', '')
-        .replace('\xa0', '')
-        .strip()
-    )
+    val_str = str(valor).strip().replace('R$', '').replace('\xa0', '').strip()
 
     if not val_str:
         return 0.0
 
     if ',' in val_str and '.' in val_str:
         if val_str.rfind(',') > val_str.rfind('.'):
-            val_str = val_str.replace('.', '')
-            val_str = val_str.replace(',', '.')
+            val_str = val_str.replace('.', '').replace(',', '.')
         else:
             val_str = val_str.replace(',', '')
     elif ',' in val_str:
@@ -52,40 +44,39 @@ def limpar_moeda_seguro(valor):
 
 
 def normalizar_subid(serie):
-
-    serie = (
-        serie
-        .fillna('')
-        .astype(str)
-        .str.strip()
-        .str.lower()
-    )
-
+    """
+    Padroniza sub_ids para evitar falhas de merge.
+    """
+    serie = serie.fillna('').astype(str).str.strip().str.lower()
     serie = serie.replace({
-        '(vazio)': '',
-        'nan': '',
-        'none': '',
-        'null': '',
+        '(vazio)': '', 'nan': '', 'none': '', 'null': '',
+        'carrosel': 'carrossel' # Correção global do erro de digitação
     })
-
     return serie
+
+
+def converter_data_segura(serie):
+    """
+    Trata tanto datas em texto (19/07/2026) quanto números seriais do Sheets (46222.38)
+    """
+    eh_numero = pd.to_numeric(serie, errors='coerce').notna()
+    
+    # Converte textos (dia primeiro)
+    datas_texto = pd.to_datetime(serie.loc[~eh_numero], dayfirst=True, errors='coerce')
+    
+    # Converte números seriais do Google Sheets (Dias desde 30/12/1899)
+    datas_numero = pd.to_timedelta(pd.to_numeric(serie.loc[eh_numero]), unit='D') + pd.Timestamp('1899-12-30')
+    
+    return pd.concat([datas_texto, datas_numero]).sort_index()
 
 
 def run_pipeline():
 
     print("Autenticando no Google Drive/Sheets...")
 
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(GCP_CREDENTIALS)
-
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        creds_dict,
-        scope
-    )
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
     client = gspread.authorize(creds)
     planilha = client.open_by_key(SHEET_ID)
@@ -116,14 +107,11 @@ def run_pipeline():
     dados_ig = []
 
     for post_id in df_semente['Post_ID']:
-        if not post_id or post_id == 'nan':
-            continue
+        if not post_id or post_id == 'nan': continue
 
         url = (
             f"https://graph.facebook.com/v18.0/{post_id}"
-            f"?fields=timestamp,insights.metric("
-            f"views,likes,comments,saved,shares"
-            f")&access_token={ACCESS_TOKEN}"
+            f"?fields=timestamp,insights.metric(views,likes,comments,saved,shares)&access_token={ACCESS_TOKEN}"
         )
 
         try:
@@ -132,7 +120,6 @@ def run_pipeline():
             data_postagem = response.get('timestamp', '')
 
             metrics = {'views': 0, 'likes': 0, 'comments': 0, 'saved': 0, 'shares': 0}
-
             for insight in insights:
                 nome_metrica = insight.get('name')
                 if nome_metrica in metrics:
@@ -147,22 +134,14 @@ def run_pipeline():
                 'Salvamentos': metrics['saved'],
                 'Compartilhamentos': metrics['shares']
             })
-
         except Exception as e:
-            print(f"Erro no Post {post_id}: {e}")
             dados_ig.append({
                 'Post_ID': post_id, 'Data_Postagem': '', 'Visualizacoes': 0, 
                 'Curtidas': 0, 'Comentarios': 0, 'Salvamentos': 0, 'Compartilhamentos': 0
             })
 
     df_meta = pd.DataFrame(dados_ig)
-    
-    # Formata a Data_Postagem no padrão BR (DD/MM/YYYY)
-    df_meta['Data_Postagem'] = (
-        pd.to_datetime(df_meta['Data_Postagem'], errors='coerce')
-        .dt.strftime('%d/%m/%Y %H:%M')
-        .fillna('-')
-    )
+    df_meta['Data_Postagem'] = pd.to_datetime(df_meta['Data_Postagem'], errors='coerce').dt.strftime('%d/%m/%Y %H:%M').fillna('-')
 
     df_analise = pd.merge(df_semente, df_meta, on='Post_ID', how='left')
 
@@ -173,12 +152,8 @@ def run_pipeline():
     print("Processando Cliques da Shopee...")
     df_cliques['Sub_id'] = df_cliques['Sub_id'].fillna('').astype(str).str.strip()
     
-    # IMPORTANTE: dayfirst=True ensina ao Python que os dados da Shopee estão no formato DD/MM
-    df_cliques['Tempo dos Cliques'] = pd.to_datetime(
-        df_cliques['Tempo dos Cliques'], 
-        dayfirst=True, 
-        errors='coerce'
-    )
+    # Aplica conversor inteligente
+    df_cliques['Tempo dos Cliques'] = converter_data_segura(df_cliques['Tempo dos Cliques'])
 
     def extrair_subs_clique(sub_str):
         partes = [p.strip().lower() for p in sub_str.split('-') if p.strip()]
@@ -189,21 +164,14 @@ def run_pipeline():
     df_cliques[['sub_id1', 'sub_id2']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
 
     shopee_cliques_agrupado = (
-        df_cliques
-        .groupby(['sub_id1', 'sub_id2'], dropna=False)
+        df_cliques.groupby(['sub_id1', 'sub_id2'], dropna=False)
         .agg(
             Cliques_Shopee=('Sub_id', 'size'),
             Data_Ultimo_Clique=('Tempo dos Cliques', 'max')
-        )
-        .reset_index()
+        ).reset_index()
     )
     
-    # Converte de volta para Texto no padrão BR (ou hífen se não tiver)
-    shopee_cliques_agrupado['Data_Ultimo_Clique'] = (
-        shopee_cliques_agrupado['Data_Ultimo_Clique']
-        .dt.strftime('%d/%m/%Y %H:%M')
-        .fillna('-')
-    )
+    shopee_cliques_agrupado['Data_Ultimo_Clique'] = shopee_cliques_agrupado['Data_Ultimo_Clique'].dt.strftime('%d/%m/%Y %H:%M').fillna('-')
 
     # =========================================================
     # 4. VENDAS SHOPEE
@@ -213,12 +181,8 @@ def run_pipeline():
     df_vendas['sub_id1'] = normalizar_subid(df_vendas['Sub_id1'])
     df_vendas['sub_id2'] = normalizar_subid(df_vendas['Sub_id2'])
 
-    # IMPORTANTE: dayfirst=True evita o erro "1970"
-    df_vendas['Horário do pedido'] = pd.to_datetime(
-        df_vendas['Horário do pedido'], 
-        dayfirst=True, 
-        errors='coerce'
-    )
+    # Aplica conversor inteligente para burlar o erro de 1970
+    df_vendas['Horário do pedido'] = converter_data_segura(df_vendas['Horário do pedido'])
 
     # =========================================================
     # 5. CAMPOS FINANCEIROS
@@ -232,55 +196,31 @@ def run_pipeline():
     # =========================================================
 
     shopee_vendas_agrupado = (
-        df_vendas
-        .groupby(['sub_id1', 'sub_id2'], dropna=False)
+        df_vendas.groupby(['sub_id1', 'sub_id2'], dropna=False)
         .agg(
             Compras_Shopee=('ID do pedido', 'nunique'),
             Valor_Total_Compras=('Valor de Compra(R$)', 'sum'),
             Comissao_Gerada=('Comissão líquida do afiliado(R$)', 'sum'),
             Data_Ultima_Venda=('Horário do pedido', 'max')
-        )
-        .reset_index()
+        ).reset_index()
     )
     
-    # Converte de volta para Texto no padrão BR (ou hífen se for nulo)
-    shopee_vendas_agrupado['Data_Ultima_Venda'] = (
-        shopee_vendas_agrupado['Data_Ultima_Venda']
-        .dt.strftime('%d/%m/%Y %H:%M')
-        .fillna('-')
-    )
+    shopee_vendas_agrupado['Data_Ultima_Venda'] = shopee_vendas_agrupado['Data_Ultima_Venda'].dt.strftime('%d/%m/%Y %H:%M').fillna('-')
 
     # =========================================================
     # 7. TICKET MÉDIO POR PEDIDO
     # =========================================================
 
-    valor_por_pedido = (
-        df_vendas
-        .groupby(['sub_id1', 'sub_id2', 'ID do pedido'], dropna=False)['Valor de Compra(R$)']
-        .sum()
-        .reset_index()
-    )
-
-    ticket_medio = (
-        valor_por_pedido
-        .groupby(['sub_id1', 'sub_id2'], dropna=False)['Valor de Compra(R$)']
-        .mean()
-        .reset_index()
-    )
-
+    valor_por_pedido = df_vendas.groupby(['sub_id1', 'sub_id2', 'ID do pedido'], dropna=False)['Valor de Compra(R$)'].sum().reset_index()
+    ticket_medio = valor_por_pedido.groupby(['sub_id1', 'sub_id2'], dropna=False)['Valor de Compra(R$)'].mean().reset_index()
     ticket_medio = ticket_medio.rename(columns={'Valor de Compra(R$)': 'Ticket_Medio(R$)'})
 
     # =========================================================
-    # 8. CONSOLIDAÇÃO SHOPEE
+    # 8. CONSOLIDAÇÃO E MERGE FINAL
     # =========================================================
 
     shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_vendas_agrupado, on=['sub_id1', 'sub_id2'], how='outer')
     shopee_consolidado = pd.merge(shopee_consolidado, ticket_medio, on=['sub_id1', 'sub_id2'], how='outer')
-
-    # =========================================================
-    # 9. MERGE COM SEMENTE / META
-    # =========================================================
-
     df_analise = pd.merge(df_analise, shopee_consolidado, on=['sub_id1', 'sub_id2'], how='left')
 
     colunas_numericas = [
@@ -289,26 +229,20 @@ def run_pipeline():
     ]
     df_analise[colunas_numericas] = df_analise[colunas_numericas].fillna(0)
     
-    # Preenche datas vazias com hífen "-" para o Google Sheets não inventar datas
     colunas_texto = ['Data_Postagem', 'Data_Ultimo_Clique', 'Data_Ultima_Venda']
     for col in colunas_texto:
         if col in df_analise.columns:
             df_analise[col] = df_analise[col].replace('', '-').fillna('-')
 
     # =========================================================
-    # 10. KPIs
+    # 9. KPIs
     # =========================================================
 
     interacoes = (df_analise['Curtidas'] + df_analise['Comentarios'] + df_analise['Salvamentos'] + df_analise['Compartilhamentos'])
-
     df_analise['Taxa_Engajamento(%)'] = np.where(df_analise['Visualizacoes'] > 0, (interacoes / df_analise['Visualizacoes']) * 100, 0)
     df_analise['Taxa_Conversao(%)'] = np.where(df_analise['Cliques_Shopee'] > 0, (df_analise['Compras_Shopee'] / df_analise['Cliques_Shopee']) * 100, 0)
     df_analise['RPC_por_clique(R$)'] = np.where(df_analise['Cliques_Shopee'] > 0, (df_analise['Comissao_Gerada'] / df_analise['Cliques_Shopee']), 0)
     df_analise['RPV_1k_views(R$)'] = np.where(df_analise['Visualizacoes'] > 0, (df_analise['Comissao_Gerada'] / df_analise['Visualizacoes']) * 1000, 0)
-
-    # =========================================================
-    # 11. LIMPEZA FINAL
-    # =========================================================
 
     df_analise = df_analise.replace([np.inf, -np.inf], np.nan)
     df_analise[colunas_numericas] = df_analise[colunas_numericas].fillna(0).round(2)
@@ -321,16 +255,13 @@ def run_pipeline():
     df_analise = df_analise.fillna('-')
 
     # =========================================================
-    # 12. GOOGLE SHEETS
+    # 10. GOOGLE SHEETS
     # =========================================================
 
     print("Enviando resultados para Dashboard...")
     aba_dashboard = planilha.worksheet("Dashboard")
     aba_dashboard.clear()
-
-    dados_para_enviar = [df_analise.columns.tolist()] + df_analise.values.tolist()
-    aba_dashboard.update(dados_para_enviar)
-
+    aba_dashboard.update([df_analise.columns.tolist()] + df_analise.values.tolist())
     print("Pipeline concluído com sucesso.")
 
 if __name__ == "__main__":
