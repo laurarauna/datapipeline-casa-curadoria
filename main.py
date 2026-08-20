@@ -52,9 +52,7 @@ def limpar_moeda_seguro(valor):
 
 
 def normalizar_subid(serie):
-    """
-    Padroniza sub_ids para evitar falhas de merge (Inclui correção do carrosel)
-    """
+
     serie = (
         serie
         .fillna('')
@@ -68,7 +66,6 @@ def normalizar_subid(serie):
         'nan': '',
         'none': '',
         'null': '',
-        'carrosel': 'carrossel' # Correção global do erro de digitação
     })
 
     return serie
