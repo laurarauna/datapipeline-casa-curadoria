@@ -50,7 +50,6 @@ def normalizar_subid(serie):
     serie = serie.fillna('').astype(str).str.strip().str.lower()
     serie = serie.replace({
         '(vazio)': '', 'nan': '', 'none': '', 'null': '',
-        'carrosel': 'carrossel' # Correção global do erro de digitação
     })
     return serie
 
