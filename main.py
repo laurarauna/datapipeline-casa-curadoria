@@ -3,2225 +3,525 @@ import numpy as np
 import requests
 import os
 import json
-import numbers
 import gspread
-
+import numbers
 from oauth2client.service_account import ServiceAccountCredentials
 
 
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
-
-ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")
-IG_ACCOUNT_ID = os.environ.get("META_IG_ACCOUNT_ID")
-GCP_CREDENTIALS = os.environ.get("GCP_CREDENTIALS")
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID")
-
-# Versão da Meta API.
-# Pode ser alterada pelo GitHub Secret META_API_VERSION.
-META_API_VERSION = os.environ.get(
-    "META_API_VERSION",
-    "v25.0"
-)
-
-META_GRAPH_HOST = os.environ.get(
-    "META_GRAPH_HOST",
-    "https://graph.facebook.com"
-)
-
-TIMEZONE = "America/Sao_Paulo"
+ACCESS_TOKEN = os.environ.get('META_ACCESS_TOKEN')
+IG_ACCOUNT_ID = os.environ.get('META_IG_ACCOUNT_ID')
+GCP_CREDENTIALS = os.environ.get('GCP_CREDENTIALS')
+SHEET_ID = os.environ.get('GOOGLE_SHEET_ID')
 
 
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
-
-def normalizar_texto(serie):
+def limpar_moeda_seguro(valor):
     """
-    Padroniza textos usados nas chaves de relacionamento.
+    Converte valores monetários sem destruir decimais válidos.
+
+    Exemplos:
+        35.99        -> 35.99
+        1.077        -> 1.077
+        1,077        -> 1.077
+        1.234,56     -> 1234.56
+        1,234.56     -> 1234.56
     """
 
-    if serie is None:
-        return serie
+    if pd.isna(valor) or valor == '':
+        return 0.0
+
+    # Se já for número, não transforma novamente
+    if isinstance(valor, numbers.Number):
+        return float(valor)
+
+    val_str = str(valor).strip()
+
+    val_str = (
+        val_str
+        .replace('R$', '')
+        .replace('\xa0', '')
+        .strip()
+    )
+
+    if not val_str:
+        return 0.0
+
+    # Formato brasileiro / internacional com milhar + decimal
+    if ',' in val_str and '.' in val_str:
+
+        # Exemplo brasileiro: 1.234,56
+        if val_str.rfind(',') > val_str.rfind('.'):
+            val_str = val_str.replace('.', '')
+            val_str = val_str.replace(',', '.')
+
+        # Exemplo internacional: 1,234.56
+        else:
+            val_str = val_str.replace(',', '')
+
+    # Apenas vírgula:
+    # 123,45 -> 123.45
+    elif ',' in val_str:
+        val_str = val_str.replace(',', '.')
+
+    # Apenas ponto:
+    # NÃO remover o ponto.
+    #
+    # 1.077 continua sendo 1.077
+    # 35.99 continua sendo 35.99
+    # 1234.56 continua sendo 1234.56
+
+    try:
+        return float(val_str)
+    except ValueError:
+        print(f'Valor monetário inválido: {valor}')
+        return 0.0
+
+
+def normalizar_subid(serie):
+    """
+    Padroniza sub_ids para evitar falhas de merge.
+    """
 
     serie = (
         serie
-        .fillna("")
+        .fillna('')
         .astype(str)
         .str.strip()
         .str.lower()
     )
 
     serie = serie.replace({
-        "(vazio)": "",
-        "nan": "",
-        "none": "",
-        "null": "",
+        '(vazio)': '',
+        'nan': '',
+        'none': '',
+        'null': '',
     })
 
     return serie
 
 
-def converter_monetario(valor):
-    """
-    Converte valores monetários de forma robusta.
-
-    Exemplos:
-        35.99       -> 35.99
-        35,99       -> 35.99
-        R$ 35,99    -> 35.99
-        1.234,56    -> 1234.56
-        1,234.56    -> 1234.56
-
-    Se o valor já for numérico, ele é mantido.
-    """
-
-    if pd.isna(valor) or valor == "":
-        return 0.0
-
-    if isinstance(valor, numbers.Number):
-        return float(valor)
-
-    texto = str(valor).strip()
-
-    if not texto:
-        return 0.0
-
-    texto = (
-        texto
-        .replace("R$", "")
-        .replace("\xa0", "")
-        .strip()
-    )
-
-    if not texto:
-        return 0.0
-
-    # Exemplo brasileiro:
-    # 1.234,56 -> 1234.56
-    #
-    # Exemplo internacional:
-    # 1,234.56 -> 1234.56
-
-    if "," in texto and "." in texto:
-
-        if texto.rfind(",") > texto.rfind("."):
-            texto = texto.replace(".", "")
-            texto = texto.replace(",", ".")
-        else:
-            texto = texto.replace(",", "")
-
-    # Exemplo:
-    # 35,99 -> 35.99
-    elif "," in texto:
-        texto = texto.replace(",", ".")
-
-    # Se tiver somente ponto:
-    # 1.077 continua 1.077
-    # 35.99 continua 35.99
-
-    try:
-        return float(texto)
-
-    except ValueError:
-        print(
-            f"[AVISO] Valor monetário inválido: {valor}"
-        )
-        return 0.0
-
-
-def requisicao_meta(url):
-    """
-    Faz requisição à Meta API.
-
-    Retorna:
-        dados_json, erro
-
-    Se houver erro:
-        dados_json = {}
-        erro = mensagem
-    """
-
-    try:
-
-        response = requests.get(
-            url,
-            timeout=30
-        )
-
-        try:
-            data = response.json()
-        except ValueError:
-            data = {}
-
-        if response.status_code != 200:
-
-            erro = (
-                f"HTTP {response.status_code}: "
-                f"{response.text[:500]}"
-            )
-
-            return {}, erro
-
-        if "error" in data:
-
-            return {}, str(data["error"])
-
-        return data, ""
-
-    except requests.RequestException as e:
-
-        return {}, f"RequestException: {e}"
-
-    except Exception as e:
-
-        return {}, f"Exception: {e}"
-
-
-def extrair_metricas_insights(data):
-    """
-    Extrai métricas retornadas pelo endpoint /insights.
-    """
-
-    metricas = {
-        "views": np.nan,
-        "likes": np.nan,
-        "comments": np.nan,
-        "saved": np.nan,
-        "shares": np.nan,
-    }
-
-    for item in data.get("data", []):
-
-        nome = item.get("name")
-
-        if nome not in metricas:
-            continue
-
-        valores = item.get("values", [])
-
-        if valores:
-
-            valor = valores[0].get("value")
-
-            if valor is not None:
-                metricas[nome] = valor
-
-    return metricas
-
-
-def obter_dados_instagram(post_id):
-    """
-    Busca metadados e métricas de um post do Instagram.
-    """
-
-    resultado = {
-        "Post_ID": str(post_id),
-
-        "Visualizacoes": np.nan,
-        "Curtidas": np.nan,
-        "Comentarios": np.nan,
-        "Salvamentos": np.nan,
-        "Compartilhamentos": np.nan,
-
-        "Data_Publicacao": "",
-        "Hora_Publicacao": "",
-        "Dia_Semana": "",
-        "Mes": "",
-        "Ano_Mes": "",
-
-        "Media_Type_API": "",
-        "Tipo_Conteudo_API": "",
-
-        "Meta_Status": "ERRO",
-        "Meta_Erro": "",
-    }
-
-    # ========================================================
-    # METADADOS DO POST
-    # ========================================================
-
-    url_media = (
-        f"{META_GRAPH_HOST}/"
-        f"{META_API_VERSION}/"
-        f"{post_id}"
-        f"?fields=timestamp,media_type,media_product_type"
-        f"&access_token={ACCESS_TOKEN}"
-    )
-
-    media_data, media_erro = requisicao_meta(
-        url_media
-    )
-
-    if media_erro:
-
-        resultado["Meta_Erro"] = (
-            f"Metadata: {media_erro}"
-        )
-
-    else:
-
-        timestamp = media_data.get(
-            "timestamp",
-            ""
-        )
-
-        if timestamp:
-
-            try:
-
-                dt_utc = pd.to_datetime(
-                    timestamp,
-                    utc=True
-                )
-
-                dt_br = dt_utc.tz_convert(
-                    TIMEZONE
-                )
-
-                resultado["Data_Publicacao"] = (
-                    dt_br.strftime("%Y-%m-%d")
-                )
-
-                resultado["Hora_Publicacao"] = (
-                    dt_br.strftime("%H:%M")
-                )
-
-                dias = {
-                    0: "segunda-feira",
-                    1: "terça-feira",
-                    2: "quarta-feira",
-                    3: "quinta-feira",
-                    4: "sexta-feira",
-                    5: "sábado",
-                    6: "domingo",
-                }
-
-                resultado["Dia_Semana"] = (
-                    dias[dt_br.weekday()]
-                )
-
-                resultado["Mes"] = (
-                    dt_br.strftime("%m")
-                )
-
-                resultado["Ano_Mes"] = (
-                    dt_br.strftime("%Y-%m")
-                )
-
-            except Exception as e:
-
-                resultado["Meta_Erro"] = (
-                    f"Erro timestamp: {e}"
-                )
-
-        resultado["Media_Type_API"] = (
-            media_data.get(
-                "media_type",
-                ""
-            )
-        )
-
-        resultado["Tipo_Conteudo_API"] = (
-            media_data.get(
-                "media_product_type",
-                ""
-            )
-        )
-
-    # ========================================================
-    # INSIGHTS
-    # ========================================================
-
-    url_insights = (
-        f"{META_GRAPH_HOST}/"
-        f"{META_API_VERSION}/"
-        f"{post_id}/insights"
-        f"?metric=views,likes,comments,saved,shares"
-        f"&access_token={ACCESS_TOKEN}"
-    )
-
-    insights_data, insights_erro = requisicao_meta(
-        url_insights
-    )
-
-    if insights_erro:
-
-        resultado["Meta_Status"] = "ERRO"
-
-        erro_atual = resultado.get(
-            "Meta_Erro",
-            ""
-        )
-
-        if erro_atual:
-
-            resultado["Meta_Erro"] += (
-                f" | Insights: {insights_erro}"
-            )
-
-        else:
-
-            resultado["Meta_Erro"] = (
-                f"Insights: {insights_erro}"
-            )
-
-        return resultado
-
-    metricas = extrair_metricas_insights(
-        insights_data
-    )
-
-    resultado["Visualizacoes"] = metricas["views"]
-    resultado["Curtidas"] = metricas["likes"]
-    resultado["Comentarios"] = metricas["comments"]
-    resultado["Salvamentos"] = metricas["saved"]
-    resultado["Compartilhamentos"] = metricas["shares"]
-
-    resultado["Meta_Status"] = "OK"
-    resultado["Meta_Erro"] = ""
-
-    return resultado
-
-
-def extrair_subs_clique(sub_str):
-    """
-    Espera valores como:
-
-        cama-carrosel
-        moveis-carrossel
-
-    Retorna:
-        sub_id1
-        sub_id2
-    """
-
-    texto = str(sub_str or "").strip()
-
-    partes = [
-        p.strip().lower()
-        for p in texto.split("-")
-        if p.strip()
-    ]
-
-    sub1 = (
-        partes[0]
-        if len(partes) >= 1
-        else ""
-    )
-
-    sub2 = (
-        partes[1]
-        if len(partes) >= 2
-        else ""
-    )
-
-    return pd.Series(
-        [
-            sub1,
-            sub2
-        ]
-    )
-
-
-def nome_tipo_conteudo(tipo):
-    """
-    Traduz alguns tipos da Meta para nomes amigáveis.
-    """
-
-    mapa = {
-        "FEED": "Feed",
-        "REELS": "Reels",
-        "STORY": "Story",
-        "CAROUSEL_ALBUM": "Carrossel",
-        "AD": "Anúncio",
-    }
-
-    return mapa.get(
-        str(tipo).upper(),
-        tipo
-    )
-
-
-def escrever_aba(
-    planilha,
-    nome_aba,
-    dataframe
-):
-    """
-    Limpa a aba e escreve o DataFrame.
-    """
-
-    try:
-
-        aba = planilha.worksheet(
-            nome_aba
-        )
-
-    except gspread.WorksheetNotFound:
-
-        aba = planilha.add_worksheet(
-            title=nome_aba,
-            rows=max(
-                len(dataframe) + 10,
-                100
-            ),
-            cols=max(
-                len(dataframe.columns) + 5,
-                20
-            )
-        )
-
-    aba.clear()
-
-    # O Google Sheets/gspread não aceita NaN ou +/-inf no JSON.
-    # Convertemos esses valores ausentes para None, que é serializado
-    # corretamente como célula vazia.
-    df_export = dataframe.copy()
-    df_export = df_export.replace([np.inf, -np.inf], np.nan)
-    df_export = df_export.astype(object).where(
-        pd.notna(df_export),
-        None
-    )
-
-    valores = (
-        [df_export.columns.tolist()]
-        + df_export.values.tolist()
-    )
-
-    aba.update(
-        valores,
-        value_input_option="USER_ENTERED"
-    )
-
-
-# ============================================================
-# PIPELINE PRINCIPAL
-# ============================================================
-
 def run_pipeline():
 
-    print("=" * 70)
-    print("INICIANDO PIPELINE")
-    print("=" * 70)
-
-    # ========================================================
-    # VALIDAÇÃO DAS CREDENCIAIS
-    # ========================================================
-
-    obrigatorias = {
-        "META_ACCESS_TOKEN": ACCESS_TOKEN,
-        "GCP_CREDENTIALS": GCP_CREDENTIALS,
-        "GOOGLE_SHEET_ID": SHEET_ID,
-    }
-
-    faltantes = [
-        nome
-        for nome, valor in obrigatorias.items()
-        if not valor
-    ]
-
-    if faltantes:
-
-        raise ValueError(
-            "Variáveis de ambiente ausentes: "
-            + ", ".join(faltantes)
-        )
-
-    # ========================================================
-    # GOOGLE SHEETS
-    # ========================================================
-
-    print(
-        "Autenticando no Google Sheets..."
-    )
+    print("Autenticando no Google Drive/Sheets...")
 
     scope = [
         "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive"
     ]
 
-    creds_dict = json.loads(
-        GCP_CREDENTIALS
+    creds_dict = json.loads(GCP_CREDENTIALS)
+
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        creds_dict,
+        scope
     )
 
-    creds = (
-        ServiceAccountCredentials
-        .from_json_keyfile_dict(
-            creds_dict,
-            scope
-        )
-    )
+    client = gspread.authorize(creds)
 
-    client = gspread.authorize(
-        creds
-    )
+    planilha = client.open_by_key(SHEET_ID)
 
-    planilha = client.open_by_key(
-        SHEET_ID
-    )
-
-    # ========================================================
-    # LEITURA DAS ABAS
-    # ========================================================
-
-    print(
-        "Lendo Tabela_Semente..."
-    )
+    print("Lendo abas...")
 
     df_semente = pd.DataFrame(
-        planilha
-        .worksheet("Tabela_Semente")
-        .get_all_records()
-    )
-
-    print(
-        "Lendo Shopee_Cliques..."
+        planilha.worksheet("Tabela_Semente").get_all_records()
     )
 
     df_cliques = pd.DataFrame(
-        planilha
-        .worksheet("Shopee_Cliques")
-        .get_all_records()
-    )
-
-    print(
-        "Lendo Shopee_Vendas..."
+        planilha.worksheet("Shopee_Cliques").get_all_records()
     )
 
     df_vendas = pd.DataFrame(
-        planilha
-        .worksheet("Shopee_Vendas")
-        .get_all_records(
-            value_render_option="UNFORMATTED_VALUE"
+    planilha.worksheet("Shopee_Vendas").get_all_records(
+        value_render_option='UNFORMATTED_VALUE'
         )
     )
 
     if df_semente.empty:
-
-        print(
-            "Tabela Semente vazia. "
-            "Encerrando."
-        )
-
+        print("Tabela Semente vazia. Encerrando.")
         return
 
-    # ========================================================
-    # PADRONIZAÇÃO DA SEMENTE
-    # ========================================================
+    # =========================================================
+    # 1. PADRONIZAÇÃO DA SEMENTE
+    # =========================================================
 
-    print(
-        "Padronizando Tabela_Semente..."
-    )
-
-    df_semente["Post_ID"] = (
-        df_semente["Post_ID"]
+    df_semente['Post_ID'] = (
+        df_semente['Post_ID']
         .astype(str)
         .str.strip()
     )
 
-    df_semente["sub_id1"] = (
-        normalizar_texto(
-            df_semente["sub_id1"]
-        )
+    df_semente['sub_id1'] = normalizar_subid(
+        df_semente['sub_id1']
     )
 
-    df_semente["sub_id2"] = (
-        normalizar_texto(
-            df_semente["sub_id2"]
-        )
+    df_semente['sub_id2'] = normalizar_subid(
+        df_semente['sub_id2']
     )
 
-    # Padronização:
-    # carrosel -> carrossel
-    df_semente["sub_id2"] = (
-        df_semente["sub_id2"]
-        .replace({
-            "carrosel": "carrossel"
-        })
-    )
+    # =========================================================
+    # 2. META / INSTAGRAM
+    # =========================================================
 
-    # ========================================================
-    # DIAGNÓSTICO DE SUB_ID
-    # ========================================================
-
-    contagem_posts_subid = (
-        df_semente
-        .groupby(
-            [
-                "sub_id1",
-                "sub_id2"
-            ],
-            dropna=False
-        )["Post_ID"]
-        .nunique()
-        .reset_index(
-            name="Posts_Com_Mesmo_SubID"
-        )
-    )
-
-    df_semente = pd.merge(
-        df_semente,
-        contagem_posts_subid,
-        on=[
-            "sub_id1",
-            "sub_id2"
-        ],
-        how="left"
-    )
-
-    df_semente[
-        "SubID_Unico_No_Post"
-    ] = (
-        df_semente[
-            "Posts_Com_Mesmo_SubID"
-        ] == 1
-    )
-
-    df_semente[
-        "Alerta_Atribuicao"
-    ] = np.where(
-        df_semente[
-            "SubID_Unico_No_Post"
-        ],
-        "OK",
-        "SUB_ID_REPETIDO"
-    )
-
-    # ========================================================
-    # INSTAGRAM / META
-    # ========================================================
-
-    print("=" * 70)
-    print("EXTRAINDO DADOS DO INSTAGRAM")
-    print(
-        f"API: {META_API_VERSION}"
-    )
-    print("=" * 70)
+    print("Extraindo dados da Meta API...")
 
     dados_ig = []
 
-    total_posts = len(
-        df_semente["Post_ID"]
-    )
+    for post_id in df_semente['Post_ID']:
 
-    for numero, post_id in enumerate(
-        df_semente["Post_ID"],
-        start=1
-    ):
-
-        if (
-            not post_id
-            or post_id.lower() == "nan"
-        ):
+        if not post_id or post_id == 'nan':
             continue
 
-        print(
-            f"[Instagram {numero}/{total_posts}] "
-            f"{post_id}"
+        url = (
+            f"https://graph.facebook.com/v18.0/{post_id}"
+            f"?fields=insights.metric("
+            f"impressions,likes,comments,saved,shares"
+            f")&access_token={ACCESS_TOKEN}"
         )
 
-        resultado = obter_dados_instagram(
-            post_id
-        )
+        try:
 
-        dados_ig.append(
-            resultado
-        )
+            response = requests.get(url, timeout=30).json()
 
-    df_meta = pd.DataFrame(
-        dados_ig
-    )
+            insights = (
+                response
+                .get('insights', {})
+                .get('data', [])
+            )
 
-    # ========================================================
-    # MERGE INSTAGRAM + SEMENTE
-    # ========================================================
+            metrics = {
+                'impressions': 0,
+                'likes': 0,
+                'comments': 0,
+                'saved': 0,
+                'shares': 0
+            }
+
+            for insight in insights:
+
+                nome_metrica = insight.get('name')
+
+                if nome_metrica in metrics:
+
+                    metrics[nome_metrica] = (
+                        insight['values'][0]['value']
+                    )
+
+            dados_ig.append({
+                'Post_ID': post_id,
+                'Visualizacoes': metrics['impressions'],
+                'Curtidas': metrics['likes'],
+                'Comentarios': metrics['comments'],
+                'Salvamentos': metrics['saved'],
+                'Compartilhamentos': metrics['shares']
+            })
+
+        except Exception as e:
+
+            print(f"Erro no Post {post_id}: {e}")
+
+            dados_ig.append({
+                'Post_ID': post_id,
+                'Visualizacoes': 0,
+                'Curtidas': 0,
+                'Comentarios': 0,
+                'Salvamentos': 0,
+                'Compartilhamentos': 0
+            })
+
+    df_meta = pd.DataFrame(dados_ig)
 
     df_analise = pd.merge(
         df_semente,
         df_meta,
-        on="Post_ID",
-        how="left",
-        validate="one_to_one"
+        on='Post_ID',
+        how='left'
     )
 
-    # ========================================================
-    # TIPO DE CONTEÚDO
-    # ========================================================
+    # =========================================================
+    # 3. CLIQUES SHOPEE
+    # =========================================================
 
-    if "Tipo de Conteúdo" in df_analise.columns:
+    print("Processando Cliques da Shopee...")
 
-        df_analise[
-            "Tipo_Conteudo"
-        ] = (
-            df_analise[
-                "Tipo de Conteúdo"
-            ]
-            .fillna(
-                df_analise[
-                    "Tipo_Conteudo_API"
-                ]
-            )
-        )
-
-    else:
-
-        df_analise[
-            "Tipo_Conteudo"
-        ] = (
-            df_analise[
-                "Tipo_Conteudo_API"
-            ]
-            .apply(
-                nome_tipo_conteudo
-            )
-        )
-
-    # ========================================================
-    # CLIQUES SHOPEE
-    # ========================================================
-
-    print("=" * 70)
-    print("PROCESSANDO CLIQUES SHOPEE")
-    print("=" * 70)
-
-    if df_cliques.empty:
-
-        shopee_cliques_agrupado = pd.DataFrame(
-            columns=[
-                "sub_id1",
-                "sub_id2",
-                "Cliques_Shopee"
-            ]
-        )
-
-    else:
-
-        df_cliques["Sub_id"] = (
-            df_cliques["Sub_id"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-        )
-
-        df_cliques[
-            [
-                "sub_id1",
-                "sub_id2"
-            ]
-        ] = (
-            df_cliques[
-                "Sub_id"
-            ]
-            .apply(
-                extrair_subs_clique
-            )
-        )
-
-        df_cliques[
-            "sub_id1"
-        ] = normalizar_texto(
-            df_cliques["sub_id1"]
-        )
-
-        df_cliques[
-            "sub_id2"
-        ] = normalizar_texto(
-            df_cliques["sub_id2"]
-        )
-
-        df_cliques[
-            "sub_id2"
-        ] = (
-            df_cliques[
-                "sub_id2"
-            ]
-            .replace({
-                "carrosel": "carrossel"
-            })
-        )
-
-        shopee_cliques_agrupado = (
-            df_cliques
-            .groupby(
-                [
-                    "sub_id1",
-                    "sub_id2"
-                ],
-                dropna=False
-            )
-            .size()
-            .reset_index(
-                name="Cliques_Shopee"
-            )
-        )
-
-    # ========================================================
-    # VENDAS SHOPEE
-    # ========================================================
-
-    print("=" * 70)
-    print("PROCESSANDO VENDAS SHOPEE")
-    print("=" * 70)
-
-    if df_vendas.empty:
-
-        raise ValueError(
-            "Shopee_Vendas está vazia."
-        )
-
-    # ========================================================
-    # SUB IDS
-    # ========================================================
-
-    df_vendas[
-        "sub_id1"
-    ] = normalizar_texto(
-        df_vendas[
-            "Sub_id1"
-        ]
-    )
-
-    df_vendas[
-        "sub_id2"
-    ] = normalizar_texto(
-        df_vendas[
-            "Sub_id2"
-        ]
-    )
-
-    df_vendas[
-        "sub_id2"
-    ] = (
-        df_vendas[
-            "sub_id2"
-        ]
-        .replace({
-            "carrosel": "carrossel"
-        })
-    )
-
-    # ========================================================
-    # CAMPOS FINANCEIROS
-    # ========================================================
-
-    df_vendas[
-        "Valor de Compra(R$)"
-    ] = (
-        df_vendas[
-            "Valor de Compra(R$)"
-        ]
-        .apply(
-            converter_monetario
-        )
-    )
-
-    df_vendas[
-        "Comissão líquida do afiliado(R$)"
-    ] = (
-        df_vendas[
-            "Comissão líquida do afiliado(R$)"
-        ]
-        .apply(
-            converter_monetario
-        )
-    )
-
-    # ========================================================
-    # ID DO PEDIDO
-    # ========================================================
-
-    df_vendas[
-        "ID do pedido"
-    ] = (
-        df_vendas[
-            "ID do pedido"
-        ]
+    df_cliques['Sub_id'] = (
+        df_cliques['Sub_id']
+        .fillna('')
         .astype(str)
         .str.strip()
     )
 
-    # ========================================================
-    # VENDAS AGREGADAS POR SUB_ID
-    # ========================================================
+    def extrair_subs_clique(sub_str):
+
+        partes = [
+            p.strip().lower()
+            for p in sub_str.split('-')
+            if p.strip()
+        ]
+
+        sub1 = partes[0] if len(partes) > 0 else ''
+        sub2 = partes[1] if len(partes) > 1 else ''
+
+        return pd.Series([sub1, sub2])
+
+    df_cliques[['sub_id1', 'sub_id2']] = (
+        df_cliques['Sub_id']
+        .apply(extrair_subs_clique)
+    )
+
+    shopee_cliques_agrupado = (
+        df_cliques
+        .groupby(
+            ['sub_id1', 'sub_id2'],
+            dropna=False
+        )
+        .size()
+        .reset_index(name='Cliques_Shopee')
+    )
+
+    # =========================================================
+    # 4. VENDAS SHOPEE
+    # =========================================================
+
+    print("Processando Vendas da Shopee...")
+
+    df_vendas['sub_id1'] = normalizar_subid(
+        df_vendas['Sub_id1']
+    )
+
+    df_vendas['sub_id2'] = normalizar_subid(
+        df_vendas['Sub_id2']
+    )
+
+    # Padronização opcional de typo
+    df_vendas['sub_id2'] = (
+        df_vendas['sub_id2']
+        .replace({'carrosel': 'carrossel'})
+    )
+
+    # =========================================================
+    # 5. CAMPOS FINANCEIROS
+    # =========================================================
+
+    df_vendas['Valor de Compra(R$)'] = pd.to_numeric(
+        df_vendas['Valor de Compra(R$)'],
+        errors='coerce'
+    ).fillna(0)
+    
+    df_vendas['Comissão líquida do afiliado(R$)'] = pd.to_numeric(
+        df_vendas['Comissão líquida do afiliado(R$)'],
+        errors='coerce'
+    ).fillna(0)
+
+    # =========================================================
+    # 6. VENDAS AGREGADAS
+    # =========================================================
 
     shopee_vendas_agrupado = (
         df_vendas
         .groupby(
-            [
-                "sub_id1",
-                "sub_id2"
-            ],
+            ['sub_id1', 'sub_id2'],
             dropna=False
         )
         .agg(
 
             # IMPORTANTE:
-            # pedidos únicos
+            # conta pedidos únicos, não linhas
             Compras_Shopee=(
-                "ID do pedido",
-                "nunique"
+                'ID do pedido',
+                'nunique'
             ),
 
-            # Soma de todos os itens
+            # Soma dos itens
             Valor_Total_Compras=(
-                "Valor de Compra(R$)",
-                "sum"
+                'Valor de Compra(R$)',
+                'sum'
             ),
 
-            # Soma das comissões
+            # Soma das comissões dos itens
             Comissao_Gerada=(
-                "Comissão líquida do afiliado(R$)",
-                "sum"
+                'Comissão líquida do afiliado(R$)',
+                'sum'
             )
         )
         .reset_index()
     )
 
-    # ========================================================
-    # VALOR POR PEDIDO
-    # ========================================================
+    # =========================================================
+    # 7. TICKET MÉDIO POR PEDIDO
+    # =========================================================
 
+    # Primeiro soma todos os itens pertencentes ao mesmo pedido
     valor_por_pedido = (
         df_vendas
         .groupby(
-            [
-                "sub_id1",
-                "sub_id2",
-                "ID do pedido"
-            ],
+            ['sub_id1', 'sub_id2', 'ID do pedido'],
             dropna=False
-        )[
-            "Valor de Compra(R$)"
-        ]
+        )['Valor de Compra(R$)']
         .sum()
-        .reset_index(
-            name="Valor_Pedido"
-        )
-    )
-
-    # ========================================================
-    # ESTATÍSTICAS DO TICKET
-    # ========================================================
-
-    ticket_estatisticas = (
-        valor_por_pedido
-        .groupby(
-            [
-                "sub_id1",
-                "sub_id2"
-            ],
-            dropna=False
-        )["Valor_Pedido"]
-        .agg(
-            Ticket_Medio="mean",
-            Ticket_Mediano="median",
-            Ticket_P25=lambda x: x.quantile(0.25),
-            Ticket_P75=lambda x: x.quantile(0.75),
-            Maior_Pedido="max",
-            Menor_Pedido="min"
-        )
         .reset_index()
     )
 
-    # ========================================================
-    # CONSOLIDADO SHOPEE
-    # ========================================================
+    # Depois calcula média dos pedidos
+    ticket_medio = (
+        valor_por_pedido
+        .groupby(
+            ['sub_id1', 'sub_id2'],
+            dropna=False
+        )['Valor de Compra(R$)']
+        .mean()
+        .reset_index()
+    )
+
+    ticket_medio = ticket_medio.rename(
+        columns={
+            'Valor de Compra(R$)': 'Ticket_Medio(R$)'
+        }
+    )
+
+    # =========================================================
+    # 8. CONSOLIDAÇÃO SHOPEE
+    # =========================================================
 
     shopee_consolidado = pd.merge(
         shopee_cliques_agrupado,
         shopee_vendas_agrupado,
-        on=[
-            "sub_id1",
-            "sub_id2"
-        ],
-        how="outer"
+        on=['sub_id1', 'sub_id2'],
+        how='outer'
     )
 
     shopee_consolidado = pd.merge(
         shopee_consolidado,
-        ticket_estatisticas,
-        on=[
-            "sub_id1",
-            "sub_id2"
-        ],
-        how="outer"
+        ticket_medio,
+        on=['sub_id1', 'sub_id2'],
+        how='outer'
     )
 
-    # ========================================================
-    # MERGE INSTAGRAM + SHOPEE
-    # ========================================================
+    # =========================================================
+    # 9. MERGE COM SEMENTE / META
+    # =========================================================
 
     df_analise = pd.merge(
         df_analise,
         shopee_consolidado,
-        on=[
-            "sub_id1",
-            "sub_id2"
-        ],
-        how="left"
+        on=['sub_id1', 'sub_id2'],
+        how='left'
     )
 
-    # ========================================================
-    # COLUNAS NUMÉRICAS
-    # ========================================================
-
-    colunas_numericas_base = [
-        "Visualizacoes",
-        "Curtidas",
-        "Comentarios",
-        "Salvamentos",
-        "Compartilhamentos",
-        "Cliques_Shopee",
-        "Compras_Shopee",
-        "Valor_Total_Compras",
-        "Comissao_Gerada",
-        "Ticket_Medio",
-        "Ticket_Mediano",
-        "Ticket_P25",
-        "Ticket_P75",
-        "Maior_Pedido",
-        "Menor_Pedido",
+    # Somente colunas numéricas recebem zero
+    colunas_numericas = [
+        'Visualizacoes',
+        'Curtidas',
+        'Comentarios',
+        'Salvamentos',
+        'Compartilhamentos',
+        'Cliques_Shopee',
+        'Compras_Shopee',
+        'Valor_Total_Compras',
+        'Comissao_Gerada',
+        'Ticket_Medio(R$)'
     ]
 
-    for coluna in colunas_numericas_base:
-
-        if coluna not in df_analise.columns:
-
-            df_analise[
-                coluna
-            ] = np.nan
-
-    # ========================================================
-    # CAMPOS SHOPEE SEM VENDA
-    # ========================================================
-
-    colunas_shopee_zero = [
-        "Cliques_Shopee",
-        "Compras_Shopee",
-        "Valor_Total_Compras",
-        "Comissao_Gerada",
-    ]
-
-    df_analise[
-        colunas_shopee_zero
-    ] = (
-        df_analise[
-            colunas_shopee_zero
-        ]
+    df_analise[colunas_numericas] = (
+        df_analise[colunas_numericas]
         .fillna(0)
     )
 
-    # ========================================================
-    # INTERAÇÕES
-    # ========================================================
+    # =========================================================
+    # 10. KPIs
+    # =========================================================
 
     interacoes = (
-        df_analise[
-            "Curtidas"
-        ].fillna(0)
-
-        + df_analise[
-            "Comentarios"
-        ].fillna(0)
-
-        + df_analise[
-            "Salvamentos"
-        ].fillna(0)
-
-        + df_analise[
-            "Compartilhamentos"
-        ].fillna(0)
+        df_analise['Curtidas']
+        + df_analise['Comentarios']
+        + df_analise['Salvamentos']
+        + df_analise['Compartilhamentos']
     )
 
-    df_analise[
-        "Interacoes"
-    ] = interacoes
-
-    # ========================================================
-    # TAXA DE ENGAJAMENTO
-    # ========================================================
-
-    df_analise[
-        "Taxa_Engajamento(%)"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
+    df_analise['Taxa_Engajamento(%)'] = np.where(
+        df_analise['Visualizacoes'] > 0,
         (
-            df_analise[
-                "Interacoes"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
+            interacoes
+            / df_analise['Visualizacoes']
         ) * 100,
-
-        np.nan
+        0
     )
 
-    # ========================================================
-    # INTERAÇÕES POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "Interacoes_1k_Views"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
+    df_analise['Taxa_Conversao(%)'] = np.where(
+        df_analise['Cliques_Shopee'] > 0,
         (
-            df_analise[
-                "Interacoes"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # SALVAMENTOS POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "Salvamentos_1k_Views"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Salvamentos"
-            ].fillna(0)
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # COMPARTILHAMENTOS POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "Compartilhamentos_1k_Views"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Compartilhamentos"
-            ].fillna(0)
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # CURTIDAS POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "Curtidas_1k_Views"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Curtidas"
-            ].fillna(0)
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # CTR INSTAGRAM -> SHOPEE
-    # ========================================================
-
-    df_analise[
-        "CTR_Shopee(%)"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Cliques_Shopee"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
+            df_analise['Compras_Shopee']
+            / df_analise['Cliques_Shopee']
         ) * 100,
-
-        np.nan
+        0
     )
 
-    # ========================================================
-    # CONVERSÃO CLIQUE -> PEDIDO
-    # ========================================================
-
-    df_analise[
-        "Conversao_Clique_Pedido(%)"
-    ] = np.where(
-        df_analise[
-            "Cliques_Shopee"
-        ] > 0,
-
+    df_analise['RPC_por_clique(R$)'] = np.where(
+        df_analise['Cliques_Shopee'] > 0,
         (
-            df_analise[
-                "Compras_Shopee"
-            ]
-            /
-            df_analise[
-                "Cliques_Shopee"
-            ]
-        ) * 100,
-
-        np.nan
-    )
-
-    # ========================================================
-    # CONVERSÃO VIEW -> PEDIDO
-    # ========================================================
-
-    df_analise[
-        "Conversao_View_Pedido(%)"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Compras_Shopee"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 100,
-
-        np.nan
-    )
-
-    # ========================================================
-    # PEDIDOS POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "Pedidos_1k_Views"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Compras_Shopee"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # GMV POR CLIQUE
-    # ========================================================
-
-    df_analise[
-        "GMV_por_Clique(R$)"
-    ] = np.where(
-        df_analise[
-            "Cliques_Shopee"
-        ] > 0,
-
-        (
-            df_analise[
-                "Valor_Total_Compras"
-            ]
-            /
-            df_analise[
-                "Cliques_Shopee"
-            ]
+            df_analise['Comissao_Gerada']
+            / df_analise['Cliques_Shopee']
         ),
-
-        np.nan
+        0
     )
 
-    # ========================================================
-    # GMV POR 1.000 VIEWS
-    # ========================================================
-
-    df_analise[
-        "GMV_por_1k_Views(R$)"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
+    df_analise['RPV_1k_views(R$)'] = np.where(
+        df_analise['Visualizacoes'] > 0,
         (
-            df_analise[
-                "Valor_Total_Compras"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
+            df_analise['Comissao_Gerada']
+            / df_analise['Visualizacoes']
         ) * 1000,
-
-        np.nan
+        0
     )
 
-    # ========================================================
-    # COMISSÃO POR CLIQUE / RPC
-    # ========================================================
-
-    df_analise[
-        "Comissao_por_Clique(R$)"
-    ] = np.where(
-        df_analise[
-            "Cliques_Shopee"
-        ] > 0,
-
-        (
-            df_analise[
-                "Comissao_Gerada"
-            ]
-            /
-            df_analise[
-                "Cliques_Shopee"
-            ]
-        ),
-
-        np.nan
-    )
-
-    # ========================================================
-    # COMISSÃO POR PEDIDO
-    # ========================================================
-
-    df_analise[
-        "Comissao_por_Pedido(R$)"
-    ] = np.where(
-        df_analise[
-            "Compras_Shopee"
-        ] > 0,
-
-        (
-            df_analise[
-                "Comissao_Gerada"
-            ]
-            /
-            df_analise[
-                "Compras_Shopee"
-            ]
-        ),
-
-        np.nan
-    )
-
-    # ========================================================
-    # COMISSÃO POR 1.000 VIEWS / RPV
-    # ========================================================
-
-    df_analise[
-        "Comissao_por_1k_Views(R$)"
-    ] = np.where(
-        df_analise[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            df_analise[
-                "Comissao_Gerada"
-            ]
-            /
-            df_analise[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
-    )
-
-    # ========================================================
-    # TAXA EFETIVA DE COMISSÃO
-    # ========================================================
-
-    df_analise[
-        "Taxa_Comissao_Efetiva(%)"
-    ] = np.where(
-        df_analise[
-            "Valor_Total_Compras"
-        ] > 0,
-
-        (
-            df_analise[
-                "Comissao_Gerada"
-            ]
-            /
-            df_analise[
-                "Valor_Total_Compras"
-            ]
-        ) * 100,
-
-        np.nan
-    )
-
-    # ========================================================
-    # DIAGNÓSTICO DE ATRIBUIÇÃO
-    # ========================================================
-
-    df_analise[
-        "Shopee_Atribuicao_Status"
-    ] = np.where(
-        df_analise[
-            "SubID_Unico_No_Post"
-        ],
-
-        "ATRIBUÍVEL_AO_POST",
-
-        "SUB_ID_REPETIDO"
-    )
-
-    # ========================================================
-    # LIMPEZA DE INF
-    # ========================================================
+    # =========================================================
+    # 11. LIMPEZA FINAL
+    # =========================================================
 
     df_analise = (
         df_analise
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-    )
-
-    # ========================================================
-    # ORGANIZAÇÃO DAS COLUNAS
-    # ========================================================
-
-    colunas_identificacao = [
-        "Post_ID",
-        "sub_id1",
-        "sub_id2",
-        "Data_Publicacao",
-        "Hora_Publicacao",
-        "Dia_Semana",
-        "Mes",
-        "Ano_Mes",
-        "Tipo_Conteudo",
-        "Media_Type_API",
-        "Tipo_Conteudo_API",
-        "Canal",
-        "Posts_Com_Mesmo_SubID",
-        "SubID_Unico_No_Post",
-        "Alerta_Atribuicao",
-        "Shopee_Atribuicao_Status",
-        "Meta_Status",
-        "Meta_Erro",
-    ]
-
-    colunas_identificacao = [
-        coluna
-        for coluna in colunas_identificacao
-        if coluna in df_analise.columns
-    ]
-
-    colunas_metricas = [
-        "Visualizacoes",
-        "Curtidas",
-        "Comentarios",
-        "Salvamentos",
-        "Compartilhamentos",
-        "Interacoes",
-
-        "Taxa_Engajamento(%)",
-        "Curtidas_1k_Views",
-        "Salvamentos_1k_Views",
-        "Compartilhamentos_1k_Views",
-        "Interacoes_1k_Views",
-
-        "Cliques_Shopee",
-        "CTR_Shopee(%)",
-
-        "Compras_Shopee",
-        "Conversao_Clique_Pedido(%)",
-        "Conversao_View_Pedido(%)",
-        "Pedidos_1k_Views",
-
-        "Valor_Total_Compras",
-        "Ticket_Medio",
-        "Ticket_Mediano",
-        "Ticket_P25",
-        "Ticket_P75",
-        "Maior_Pedido",
-        "Menor_Pedido",
-
-        "GMV_por_Clique(R$)",
-        "GMV_por_1k_Views(R$)",
-
-        "Comissao_Gerada",
-        "Comissao_por_Clique(R$)",
-        "Comissao_por_Pedido(R$)",
-        "Comissao_por_1k_Views(R$)",
-        "Taxa_Comissao_Efetiva(%)",
-    ]
-
-    colunas_metricas = [
-        coluna
-        for coluna in colunas_metricas
-        if coluna in df_analise.columns
-    ]
-
-    colunas_restantes = [
-        coluna
-        for coluna in df_analise.columns
-        if coluna not in (
-            colunas_identificacao
-            + colunas_metricas
-        )
-    ]
-
-    df_analise = df_analise[
-        colunas_identificacao
-        + colunas_metricas
-        + colunas_restantes
-    ]
-
-    # ========================================================
-    # CONVERSÕES NUMÉRICAS
-    # ========================================================
-
-    colunas_inteiras = [
-        "Visualizacoes",
-        "Curtidas",
-        "Comentarios",
-        "Salvamentos",
-        "Compartilhamentos",
-        "Interacoes",
-        "Cliques_Shopee",
-        "Compras_Shopee",
-    ]
-
-    for coluna in colunas_inteiras:
-
-        if coluna in df_analise.columns:
-
-            df_analise[coluna] = pd.to_numeric(
-                df_analise[coluna],
-                errors="coerce"
-            )
-
-    colunas_financeiras = [
-        "Valor_Total_Compras",
-        "Ticket_Medio",
-        "Ticket_Mediano",
-        "Ticket_P25",
-        "Ticket_P75",
-        "Maior_Pedido",
-        "Menor_Pedido",
-        "GMV_por_Clique(R$)",
-        "GMV_por_1k_Views(R$)",
-        "Comissao_Gerada",
-        "Comissao_por_Clique(R$)",
-        "Comissao_por_Pedido(R$)",
-        "Comissao_por_1k_Views(R$)",
-    ]
-
-    for coluna in colunas_financeiras:
-
-        if coluna in df_analise.columns:
-
-            df_analise[coluna] = (
-                pd.to_numeric(
-                    df_analise[coluna],
-                    errors="coerce"
-                )
-                .round(4)
-            )
-
-    colunas_taxas = [
-        "Taxa_Engajamento(%)",
-        "CTR_Shopee(%)",
-        "Conversao_Clique_Pedido(%)",
-        "Conversao_View_Pedido(%)",
-        "Taxa_Comissao_Efetiva(%)",
-        "Curtidas_1k_Views",
-        "Salvamentos_1k_Views",
-        "Compartilhamentos_1k_Views",
-        "Interacoes_1k_Views",
-        "Pedidos_1k_Views",
-    ]
-
-    for coluna in colunas_taxas:
-
-        if coluna in df_analise.columns:
-
-            df_analise[coluna] = (
-                pd.to_numeric(
-                    df_analise[coluna],
-                    errors="coerce"
-                )
-                .round(4)
-            )
-
-    # ========================================================
-    # DASHBOARD POR SUB_ID
-    # ========================================================
-
-    print(
-        "Criando Dashboard_SubID..."
-    )
-
-    instagram_subid = (
-        df_analise
-        .groupby(
-            [
-                "sub_id1",
-                "sub_id2"
-            ],
-            dropna=False
-        )
-        .agg(
-
-            Posts=(
-                "Post_ID",
-                "nunique"
-            ),
-
-            Visualizacoes=(
-                "Visualizacoes",
-                "sum"
-            ),
-
-            Curtidas=(
-                "Curtidas",
-                "sum"
-            ),
-
-            Comentarios=(
-                "Comentarios",
-                "sum"
-            ),
-
-            Salvamentos=(
-                "Salvamentos",
-                "sum"
-            ),
-
-            Compartilhamentos=(
-                "Compartilhamentos",
-                "sum"
-            )
-        )
-        .reset_index()
-    )
-
-    instagram_subid[
-        "Interacoes"
-    ] = (
-        instagram_subid[
-            "Curtidas"
-        ].fillna(0)
-
-        + instagram_subid[
-            "Comentarios"
-        ].fillna(0)
-
-        + instagram_subid[
-            "Salvamentos"
-        ].fillna(0)
-
-        + instagram_subid[
-            "Compartilhamentos"
-        ].fillna(0)
-    )
-
-    dashboard_subid = pd.merge(
-        instagram_subid,
-        shopee_consolidado,
-        on=[
-            "sub_id1",
-            "sub_id2"
-        ],
-        how="outer"
-    )
-
-    # ========================================================
-    # ZEROS NOS CAMPOS SHOPEE
-    # ========================================================
-
-    dashboard_subid[
-        [
-            "Cliques_Shopee",
-            "Compras_Shopee",
-            "Valor_Total_Compras",
-            "Comissao_Gerada",
-        ]
-    ] = (
-        dashboard_subid[
-            [
-                "Cliques_Shopee",
-                "Compras_Shopee",
-                "Valor_Total_Compras",
-                "Comissao_Gerada",
-            ]
-        ]
+        .replace([np.inf, -np.inf], np.nan)
         .fillna(0)
     )
 
-    # ========================================================
-    # KPIs POR SUB_ID
-    # ========================================================
-
-    dashboard_subid[
-        "Taxa_Engajamento(%)"
-    ] = np.where(
-        dashboard_subid[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Interacoes"
-            ]
-            /
-            dashboard_subid[
-                "Visualizacoes"
-            ]
-        ) * 100,
-
-        np.nan
+    # Arredonda somente métricas numéricas
+    df_analise[colunas_numericas] = (
+        df_analise[colunas_numericas]
+        .round(2)
     )
 
-    dashboard_subid[
-        "CTR_Shopee(%)"
-    ] = np.where(
-        dashboard_subid[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Cliques_Shopee"
-            ]
-            /
-            dashboard_subid[
-                "Visualizacoes"
-            ]
-        ) * 100,
-
-        np.nan
+    df_analise['Taxa_Engajamento(%)'] = (
+        df_analise['Taxa_Engajamento(%)'].round(2)
     )
 
-    dashboard_subid[
-        "Conversao_Clique_Pedido(%)"
-    ] = np.where(
-        dashboard_subid[
-            "Cliques_Shopee"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Compras_Shopee"
-            ]
-            /
-            dashboard_subid[
-                "Cliques_Shopee"
-            ]
-        ) * 100,
-
-        np.nan
+    df_analise['Taxa_Conversao(%)'] = (
+        df_analise['Taxa_Conversao(%)'].round(2)
     )
 
-    dashboard_subid[
-        "Conversao_View_Pedido(%)"
-    ] = np.where(
-        dashboard_subid[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Compras_Shopee"
-            ]
-            /
-            dashboard_subid[
-                "Visualizacoes"
-            ]
-        ) * 100,
-
-        np.nan
+    df_analise['RPC_por_clique(R$)'] = (
+        df_analise['RPC_por_clique(R$)'].round(4)
     )
 
-    dashboard_subid[
-        "GMV_por_1k_Views(R$)"
-    ] = np.where(
-        dashboard_subid[
-            "Visualizacoes"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Valor_Total_Compras"
-            ]
-            /
-            dashboard_subid[
-                "Visualizacoes"
-            ]
-        ) * 1000,
-
-        np.nan
+    df_analise['RPV_1k_views(R$)'] = (
+        df_analise['RPV_1k_views(R$)'].round(4)
     )
 
-    dashboard_subid[
-        "Comissao_por_1k_Views(R$)"
-    ] = np.where(
-        dashboard_subid[
-            "Visualizacoes"
-        ] > 0,
+    # =========================================================
+    # 12. GOOGLE SHEETS
+    # =========================================================
 
-        (
-            dashboard_subid[
-                "Comissao_Gerada"
-            ]
-            /
-            dashboard_subid[
-                "Visualizacoes"
-            ]
-        ) * 1000,
+    print("Enviando resultados para Dashboard...")
 
-        np.nan
+    aba_dashboard = planilha.worksheet("Dashboard")
+
+    aba_dashboard.clear()
+
+    dados_para_enviar = (
+        [df_analise.columns.tolist()]
+        + df_analise.values.tolist()
     )
 
-    dashboard_subid[
-        "Comissao_por_Clique(R$)"
-    ] = np.where(
-        dashboard_subid[
-            "Cliques_Shopee"
-        ] > 0,
+    aba_dashboard.update(dados_para_enviar)
 
-        (
-            dashboard_subid[
-                "Comissao_Gerada"
-            ]
-            /
-            dashboard_subid[
-                "Cliques_Shopee"
-            ]
-        ),
-
-        np.nan
-    )
-
-    dashboard_subid[
-        "Comissao_por_Pedido(R$)"
-    ] = np.where(
-        dashboard_subid[
-            "Compras_Shopee"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Comissao_Gerada"
-            ]
-            /
-            dashboard_subid[
-                "Compras_Shopee"
-            ]
-        ),
-
-        np.nan
-    )
-
-    dashboard_subid[
-        "Taxa_Comissao_Efetiva(%)"
-    ] = np.where(
-        dashboard_subid[
-            "Valor_Total_Compras"
-        ] > 0,
-
-        (
-            dashboard_subid[
-                "Comissao_Gerada"
-            ]
-            /
-            dashboard_subid[
-                "Valor_Total_Compras"
-            ]
-        ) * 100,
-
-        np.nan
-    )
-
-    dashboard_subid = (
-        dashboard_subid
-        .replace(
-            [np.inf, -np.inf],
-            np.nan
-        )
-    )
-
-    # ========================================================
-    # DIAGNÓSTICO
-    # ========================================================
-
-    print(
-        "Criando Diagnostico..."
-    )
-
-    diagnostico = []
-
-    # --------------------------------------------------------
-    # META
-    # --------------------------------------------------------
-
-    if "Meta_Status" in df_analise.columns:
-
-        meta_ok = (
-            df_analise[
-                "Meta_Status"
-            ] == "OK"
-        ).sum()
-
-        meta_erro = (
-            df_analise[
-                "Meta_Status"
-            ] != "OK"
-        ).sum()
-
-        diagnostico.append({
-            "Tipo": "META",
-            "Indicador": "Posts processados",
-            "Valor": len(df_analise),
-            "Observacao": ""
-        })
-
-        diagnostico.append({
-            "Tipo": "META",
-            "Indicador": "Posts OK",
-            "Valor": meta_ok,
-            "Observacao": ""
-        })
-
-        diagnostico.append({
-            "Tipo": "META",
-            "Indicador": "Posts com erro",
-            "Valor": meta_erro,
-            "Observacao": (
-                "Verifique Meta_Erro"
-                if meta_erro > 0
-                else ""
-            )
-        })
-
-    # --------------------------------------------------------
-    # VIEWS
-    # --------------------------------------------------------
-
-    if "Visualizacoes" in df_analise.columns:
-
-        views_validas = (
-            df_analise[
-                "Visualizacoes"
-            ]
-            .notna()
-            .sum()
-        )
-
-        views_zero = (
-            df_analise[
-                "Visualizacoes"
-            ] == 0
-        ).sum()
-
-        diagnostico.append({
-            "Tipo": "INSTAGRAM",
-            "Indicador": "Posts com views",
-            "Valor": views_validas,
-            "Observacao": ""
-        })
-
-        diagnostico.append({
-            "Tipo": "INSTAGRAM",
-            "Indicador": "Posts com views = 0",
-            "Valor": views_zero,
-            "Observacao": (
-                "Pode indicar ausência real "
-                "ou indisponibilidade da API"
-            )
-        })
-
-    # --------------------------------------------------------
-    # SUB IDS REPETIDOS
-    # --------------------------------------------------------
-
-    duplicados = (
-        df_semente[
-            df_semente[
-                "Posts_Com_Mesmo_SubID"
-            ] > 1
-        ][
-            [
-                "sub_id1",
-                "sub_id2",
-                "Posts_Com_Mesmo_SubID"
-            ]
-        ]
-        .drop_duplicates()
-    )
-
-    diagnostico.append({
-        "Tipo": "ATRIBUICAO",
-        "Indicador": "Combinações sub_id repetidas",
-        "Valor": len(duplicados),
-        "Observacao": (
-            "Se a intenção for atribuição individual, "
-            "cada combinação sub_id1 + sub_id2 "
-            "deve ser única por post."
-        )
-    })
-
-    # --------------------------------------------------------
-    # VALORES NEGATIVOS
-    # --------------------------------------------------------
-
-    valores_negativos = (
-        (
-            df_vendas[
-                "Valor de Compra(R$)"
-            ] < 0
-        ).sum()
-    )
-
-    comissoes_negativas = (
-        (
-            df_vendas[
-                "Comissão líquida do afiliado(R$)"
-            ] < 0
-        ).sum()
-    )
-
-    diagnostico.append({
-        "Tipo": "SHOPEE",
-        "Indicador": "Valores de compra negativos",
-        "Valor": valores_negativos,
-        "Observacao": (
-            "Pode representar ajuste ou reembolso."
-        )
-    })
-
-    diagnostico.append({
-        "Tipo": "SHOPEE",
-        "Indicador": "Comissões negativas",
-        "Valor": comissoes_negativas,
-        "Observacao": (
-            "Pode representar ajuste ou reembolso."
-        )
-    })
-
-    df_diagnostico = pd.DataFrame(
-        diagnostico
-    )
-
-    # ========================================================
-    # EXPORTAÇÃO
-    # ========================================================
-
-    print("=" * 70)
-    print("ESCREVENDO RESULTADOS")
-    print("=" * 70)
-
-    # Dashboard por post
-    escrever_aba(
-        planilha,
-        "Dashboard",
-        df_analise
-    )
-
-    # Dashboard agregado por sub_id
-    escrever_aba(
-        planilha,
-        "Dashboard_SubID",
-        dashboard_subid
-    )
-
-    # Diagnóstico
-    escrever_aba(
-        planilha,
-        "Diagnostico",
-        df_diagnostico
-    )
-
-    print("=" * 70)
-    print("PIPELINE CONCLUÍDO")
-    print("=" * 70)
-
-    print(
-        f"Posts processados: "
-        f"{len(df_analise)}"
-    )
-
-    if "Meta_Status" in df_analise.columns:
-
-        print(
-            "Posts com Meta OK: "
-            f"{meta_ok}"
-        )
-
-        print(
-            "Posts com erro Meta: "
-            f"{meta_erro}"
-        )
-
-    print(
-        f"Combinações sub_id: "
-        f"{len(dashboard_subid)}"
-    )
-
-    print(
-        "Abas atualizadas:"
-    )
-
-    print("  - Dashboard")
-    print("  - Dashboard_SubID")
-    print("  - Diagnostico")
-
-
-# ============================================================
-# EXECUÇÃO
-# ============================================================
+    print("Pipeline concluído com sucesso.")
 
 if __name__ == "__main__":
     run_pipeline()
