@@ -95,8 +95,10 @@ def run_pipeline():
     # =========================================================
 
     df_semente['Post_ID'] = df_semente['Post_ID'].astype(str).str.strip()
-    df_semente['sub_id1'] = normalizar_subid(df_semente['sub_id1'])
-    df_semente['sub_id2'] = normalizar_subid(df_semente['sub_id2'])
+    df_semente['sub_id1'] = normalizar_subid(df_semente.get('sub_id1', pd.Series('')))
+    df_semente['sub_id2'] = normalizar_subid(df_semente.get('sub_id2', pd.Series('')))
+    # Adicionando sub_id3 com get() caso a coluna falte em alguma execução antiga
+    df_semente['sub_id3'] = normalizar_subid(df_semente.get('sub_id3', pd.Series('')))
 
     # =========================================================
     # 2. META / INSTAGRAM
@@ -158,12 +160,13 @@ def run_pipeline():
         partes = [p.strip().lower() for p in sub_str.split('-') if p.strip()]
         sub1 = partes[0] if len(partes) > 0 else ''
         sub2 = partes[1] if len(partes) > 1 else ''
-        return pd.Series([sub1, sub2])
+        sub3 = partes[2] if len(partes) > 2 else '' # Capturando o 3º parâmetro
+        return pd.Series([sub1, sub2, sub3])
 
-    df_cliques[['sub_id1', 'sub_id2']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
+    df_cliques[['sub_id1', 'sub_id2', 'sub_id3']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
 
     shopee_cliques_agrupado = (
-        df_cliques.groupby(['sub_id1', 'sub_id2'], dropna=False)
+        df_cliques.groupby(['sub_id1', 'sub_id2', 'sub_id3'], dropna=False)
         .agg(
             Cliques_Shopee=('Sub_id', 'size'),
             Data_Ultimo_Clique=('Tempo dos Cliques', 'max')
@@ -177,8 +180,10 @@ def run_pipeline():
     # =========================================================
 
     print("Processando Vendas da Shopee...")
-    df_vendas['sub_id1'] = normalizar_subid(df_vendas['Sub_id1'])
-    df_vendas['sub_id2'] = normalizar_subid(df_vendas['Sub_id2'])
+    df_vendas['sub_id1'] = normalizar_subid(df_vendas.get('Sub_id1', pd.Series('')))
+    df_vendas['sub_id2'] = normalizar_subid(df_vendas.get('Sub_id2', pd.Series('')))
+    # Shopee reports podem ter até Sub_id5, adicionando segurança para o 3
+    df_vendas['sub_id3'] = normalizar_subid(df_vendas.get('Sub_id3', pd.Series('')))
 
     # Aplica conversor inteligente para burlar o erro de 1970
     df_vendas['Horário do pedido'] = converter_data_segura(df_vendas['Horário do pedido'])
@@ -195,7 +200,7 @@ def run_pipeline():
     # =========================================================
 
     shopee_vendas_agrupado = (
-        df_vendas.groupby(['sub_id1', 'sub_id2'], dropna=False)
+        df_vendas.groupby(['sub_id1', 'sub_id2', 'sub_id3'], dropna=False)
         .agg(
             Compras_Shopee=('ID do pedido', 'nunique'),
             Valor_Total_Compras=('Valor de Compra(R$)', 'sum'),
@@ -210,17 +215,17 @@ def run_pipeline():
     # 7. TICKET MÉDIO POR PEDIDO
     # =========================================================
 
-    valor_por_pedido = df_vendas.groupby(['sub_id1', 'sub_id2', 'ID do pedido'], dropna=False)['Valor de Compra(R$)'].sum().reset_index()
-    ticket_medio = valor_por_pedido.groupby(['sub_id1', 'sub_id2'], dropna=False)['Valor de Compra(R$)'].mean().reset_index()
+    valor_por_pedido = df_vendas.groupby(['sub_id1', 'sub_id2', 'sub_id3', 'ID do pedido'], dropna=False)['Valor de Compra(R$)'].sum().reset_index()
+    ticket_medio = valor_por_pedido.groupby(['sub_id1', 'sub_id2', 'sub_id3'], dropna=False)['Valor de Compra(R$)'].mean().reset_index()
     ticket_medio = ticket_medio.rename(columns={'Valor de Compra(R$)': 'Ticket_Medio(R$)'})
 
     # =========================================================
     # 8. CONSOLIDAÇÃO E MERGE FINAL
     # =========================================================
 
-    shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_vendas_agrupado, on=['sub_id1', 'sub_id2'], how='outer')
-    shopee_consolidado = pd.merge(shopee_consolidado, ticket_medio, on=['sub_id1', 'sub_id2'], how='outer')
-    df_analise = pd.merge(df_analise, shopee_consolidado, on=['sub_id1', 'sub_id2'], how='left')
+    shopee_consolidado = pd.merge(shopee_cliques_agrupado, shopee_vendas_agrupado, on=['sub_id1', 'sub_id2', 'sub_id3'], how='outer')
+    shopee_consolidado = pd.merge(shopee_consolidado, ticket_medio, on=['sub_id1', 'sub_id2', 'sub_id3'], how='outer')
+    df_analise = pd.merge(df_analise, shopee_consolidado, on=['sub_id1', 'sub_id2', 'sub_id3'], how='left')
 
     colunas_numericas = [
         'Visualizacoes', 'Curtidas', 'Comentarios', 'Salvamentos', 'Compartilhamentos',
