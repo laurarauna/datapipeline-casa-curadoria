@@ -164,11 +164,11 @@ def run_pipeline():
 
     df_cliques[['sub_id1', 'sub_id2', 'sub_id3']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
 
-   shopee_cliques_agrupado = (
+    shopee_cliques_agrupado = (
         df_cliques.groupby(['sub_id1', 'sub_id2', 'sub_id3'], dropna=False)
         .agg(
             Cliques_Shopee=('Sub_id', 'size'),
-            Data_Primeiro_Clique=('Tempo dos Cliques', 'min'), # NOVO: Pega o primeiro clique
+            Data_Primeiro_Clique=('Tempo dos Cliques', 'min'),
             Data_Ultimo_Clique=('Tempo dos Cliques', 'max')
         ).reset_index()
     )
