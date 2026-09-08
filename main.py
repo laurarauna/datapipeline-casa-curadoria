@@ -164,14 +164,16 @@ def run_pipeline():
 
     df_cliques[['sub_id1', 'sub_id2', 'sub_id3']] = df_cliques['Sub_id'].apply(extrair_subs_clique)
 
-    shopee_cliques_agrupado = (
+   shopee_cliques_agrupado = (
         df_cliques.groupby(['sub_id1', 'sub_id2', 'sub_id3'], dropna=False)
         .agg(
             Cliques_Shopee=('Sub_id', 'size'),
+            Data_Primeiro_Clique=('Tempo dos Cliques', 'min'), # NOVO: Pega o primeiro clique
             Data_Ultimo_Clique=('Tempo dos Cliques', 'max')
         ).reset_index()
     )
     
+    shopee_cliques_agrupado['Data_Primeiro_Clique'] = shopee_cliques_agrupado['Data_Primeiro_Clique'].dt.strftime('%d/%m/%Y %H:%M').fillna('-')
     shopee_cliques_agrupado['Data_Ultimo_Clique'] = shopee_cliques_agrupado['Data_Ultimo_Clique'].dt.strftime('%d/%m/%Y %H:%M').fillna('-')
 
     # =========================================================
@@ -230,7 +232,7 @@ def run_pipeline():
     ]
     df_analise[colunas_numericas] = df_analise[colunas_numericas].fillna(0)
     
-    colunas_texto = ['Data_Postagem', 'Data_Ultimo_Clique', 'Data_Ultima_Venda']
+    colunas_texto = ['Data_Postagem', 'Data_Ultimo_Clique', 'Data_Ultima_Venda', 'Data_Primeiro_Clique']
     for col in colunas_texto:
         if col in df_analise.columns:
             df_analise[col] = df_analise[col].replace('', '-').fillna('-')
@@ -274,10 +276,15 @@ def run_pipeline():
     df_stories = shopee_consolidado[shopee_consolidado['sub_id2'].isin(['story', 'stories'])].copy()
     
     if not df_stories.empty:
-        # Preenche os vazios e recalcula a taxa de conversão sem depender do merge da Meta
+        # Preenche os vazios e formata os valores numéricos
         df_stories['Cliques_Shopee'] = df_stories['Cliques_Shopee'].fillna(0)
         df_stories['Compras_Shopee'] = df_stories['Compras_Shopee'].fillna(0)
         df_stories['Valor_Total_Compras'] = df_stories['Valor_Total_Compras'].fillna(0).round(2)
+        df_stories['Comissao_Gerada'] = df_stories['Comissao_Gerada'].fillna(0).round(2)
+        
+        # Garante que campos vazios de data recebam o hífen
+        df_stories['Data_Primeiro_Clique'] = df_stories['Data_Primeiro_Clique'].fillna('-')
+        df_stories['Data_Ultimo_Clique'] = df_stories['Data_Ultimo_Clique'].fillna('-')
         
         df_stories['Taxa_Conversao(%)'] = np.where(
             df_stories['Cliques_Shopee'] > 0, 
@@ -286,18 +293,25 @@ def run_pipeline():
         )
         df_stories['Taxa_Conversao(%)'] = df_stories['Taxa_Conversao(%)'].round(2)
         
-        # Seleciona apenas as colunas que importam para você
+        # Lista completa com a ordem exata das colunas
         colunas_stories = [
-            'sub_id1', 'sub_id2', 'Cliques_Shopee', 'Compras_Shopee', 
-            'Valor_Total_Compras', 'Taxa_Conversao(%)'
+            'sub_id1', 
+            'sub_id2', 
+            'Data_Primeiro_Clique',
+            'Data_Ultimo_Clique',
+            'Cliques_Shopee', 
+            'Compras_Shopee', 
+            'Valor_Total_Compras', 
+            'Comissao_Gerada', 
+            'Taxa_Conversao(%)'
         ]
+        
         df_stories_limpo = df_stories[colunas_stories].sort_values(by='Compras_Shopee', ascending=False)
         
         # Envia para o Google Sheets
         try:
             aba_stories = planilha.worksheet("Dashboard_Stories")
         except gspread.exceptions.WorksheetNotFound:
-            # Cria a aba automaticamente caso ela não exista
             aba_stories = planilha.add_worksheet(title="Dashboard_Stories", rows="100", cols="10")
             
         aba_stories.clear()
